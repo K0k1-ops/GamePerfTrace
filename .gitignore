@@ -1,0 +1,10 @@
+build/
+bin/
+obj/
+*.csv
+perf_session.csv
+.vscode/
+.idea/
+*.user
+CMakeCache.txt
+CMakeFiles/

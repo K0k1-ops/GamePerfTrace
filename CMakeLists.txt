@@ -32,7 +32,12 @@ set(IMGUI_SRCS
     ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
 )
 
-add_executable(GamePerfTrace main.cpp SystemMonitor.cpp ${IMGUI_SRCS})
+# Definición del ejecutable (solo una vez con todos los archivos .cpp)
+add_executable(GamePerfTrace 
+    main.cpp 
+    SystemMonitor.cpp 
+    ${IMGUI_SRCS}
+)
 
 target_include_directories(GamePerfTrace PRIVATE 
     ${imgui_SOURCE_DIR} 
@@ -41,12 +46,13 @@ target_include_directories(GamePerfTrace PRIVATE
 
 find_package(OpenGL REQUIRED)
 
-target_link_libraries(GamePerfTrace PRIVATE glfw OpenGL::GL)
-
-# Ocultar la consola de comandos en Windows para lanzarse como GUI pura
+# Enlace de librerías condicional según el sistema operativo
 if(WIN32)
-    set_target_properties(GamePerfTrace PROPERTIES 
-        WIN32_EXECUTABLE TRUE
-        LINK_FLAGS "/SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup"
-    )
+    target_link_libraries(GamePerfTrace PRIVATE glfw OpenGL::GL)
+    if(MSVC)
+        # Oculta la consola de comandos de Windows al arrancar
+        target_link_options(GamePerfTrace PRIVATE "/SUBSYSTEM:WINDOWS" "/ENTRY:mainCRTStartup")
+    endif()
+else()
+    target_link_libraries(GamePerfTrace PRIVATE glfw OpenGL::GL pthread dl)
 endif()

@@ -43,6 +43,10 @@ find_package(OpenGL REQUIRED)
 
 target_link_libraries(GamePerfTrace PRIVATE glfw OpenGL::GL)
 
+# Ocultar la consola de comandos en Windows para lanzarse como GUI pura
 if(WIN32)
-    target_link_libraries(GamePerfTrace PRIVATE psapi pdh)
+    set_target_properties(GamePerfTrace PROPERTIES 
+        WIN32_EXECUTABLE TRUE
+        LINK_FLAGS "/SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup"
+    )
 endif()

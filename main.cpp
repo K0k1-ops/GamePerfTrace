@@ -2,6 +2,10 @@
 #define GL_SHADING_LANGUAGE_VERSION 0x8B8C
 #endif
 
+#if defined(_MSC_VER)
+#pragma comment(linker, "/ENTRY:mainCRTStartup")
+#endif
+
 #include <iostream>
 #include <vector>
 #include <algorithm>

@@ -15,7 +15,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Configure CMake
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+        run: cmake -B build
 
       - name: Build executable
         run: cmake --build build --config Release
@@ -24,4 +24,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: GamePerfTrace-Windows-x64
-          path: build/Release/GamePerfTrace.exe
+          path: build/**/GamePerfTrace.exe

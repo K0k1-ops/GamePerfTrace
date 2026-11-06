@@ -1,3 +1,7 @@
+#ifndef GL_SHADING_LANGUAGE_VERSION
+#define GL_SHADING_LANGUAGE_VERSION 0x8B8C
+#endif
+
 #include <iostream>
 #include <vector>
 #include <algorithm>
@@ -25,7 +29,7 @@ std::string formatUptime(uint64_t seconds) {
     uint64_t mins = (seconds % 3600) / 60;
     uint64_t secs = seconds % 60;
     char buffer[64];
-    snprintf(buffer, sizeof(buffer), "%lu h %lu m %lu s", hrs, mins, secs);
+    snprintf(buffer, sizeof(buffer), "%llu h %llu m %llu s", hrs, mins, secs);
     return std::string(buffer);
 }
 

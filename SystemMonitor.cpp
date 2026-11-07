@@ -304,19 +304,22 @@ GpuMetrics SystemMonitor::getGpuMetrics() {
     return getAmdIntelGpuMetrics();
 #endif
 }
-
 float SystemMonitor::getCpuTemperature() {
 #ifdef _WIN32
     float temp = 0.0f;
     HRESULT hres = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-    bool co_initialized = SUCCEEDED(hres) || hres == S_FALSE;
+    bool co_initialized = SUCCEEDED(hres) || hres == S_OK || hres == S_FALSE;
 
     IWbemLocator *pLoc = NULL;
     HRESULT hr = CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, reinterpret_cast<LPVOID*>(&pLoc));
     if (SUCCEEDED(hr) && pLoc) {
+        // Método 1: Query ROOT\WMI (MSAcpi_ThermalZoneTemperature)
         IWbemServices *pSvc = NULL;
         hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\WMI"), NULL, NULL, 0, NULL, 0, 0, &pSvc);
         if (SUCCEEDED(hr) && pSvc) {
+            CoSetProxyBlanket(pSvc, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, NULL,
+                              RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, NULL, EOAC_NONE);
+
             IEnumWbemClassObject* pEnumerator = NULL;
             hr = pSvc->ExecQuery(_bstr_t("WQL"), _bstr_t("SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature"),
                 WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnumerator);
@@ -336,6 +339,40 @@ float SystemMonitor::getCpuTemperature() {
             }
             pSvc->Release();
         }
+
+        // Método 2: Fallback a ROOT\CIMV2 (Win32_PerfFormattedData_Counters_ThermalZoneInformation)
+        if (temp <= 0.0f) {
+            pSvc = NULL;
+            hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\CIMV2"), NULL, NULL, 0, NULL, 0, 0, &pSvc);
+            if (SUCCEEDED(hr) && pSvc) {
+                CoSetProxyBlanket(pSvc, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, NULL,
+                                  RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, NULL, EOAC_NONE);
+
+                IEnumWbemClassObject* pEnumerator = NULL;
+                hr = pSvc->ExecQuery(_bstr_t("WQL"), _bstr_t("SELECT HighPrecisionTemperature, Temperature FROM Win32_PerfFormattedData_Counters_ThermalZoneInformation"),
+                    WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnumerator);
+                if (SUCCEEDED(hr) && pEnumerator) {
+                    IWbemClassObject *pclsObj = NULL;
+                    ULONG uReturn = 0;
+                    if (pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK && uReturn > 0) {
+                        VARIANT vtProp;
+                        if (SUCCEEDED(pclsObj->Get(L"HighPrecisionTemperature", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL && vtProp.ulVal > 0) {
+                            float kelvin100 = static_cast<float>(vtProp.ulVal);
+                            temp = (kelvin100 / 100.0f) - 273.15f;
+                            VariantClear(&vtProp);
+                        } else if (SUCCEEDED(pclsObj->Get(L"Temperature", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL && vtProp.ulVal > 0) {
+                            float kelvin = static_cast<float>(vtProp.ulVal);
+                            temp = kelvin - 273.15f;
+                            VariantClear(&vtProp);
+                        }
+                        pclsObj->Release();
+                    }
+                    pEnumerator->Release();
+                }
+                pSvc->Release();
+            }
+        }
+
         pLoc->Release();
     }
     if (co_initialized) {

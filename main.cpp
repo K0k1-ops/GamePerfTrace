@@ -29,6 +29,9 @@ struct TelemetrySample {
     float frametime_ms;
     float cpu_usage;
     float cpu_temp;
+    float gpu_usage;
+    float gpu_temp;
+    float vram_mb;
     float ram_mb;
     float net_kbps;
     float disk_kbps;
@@ -146,7 +149,7 @@ std::string ExportBenchmarkToCSV(const std::vector<TelemetrySample>& samples) {
     std::ofstream file(filename);
     if (!file.is_open()) return "";
 
-    file << "Time_Sec,FPS,Frametime_ms,CPU_Usage_Pct,CPU_Temp_C,RAM_Used_MB,Net_DL_KBps,Disk_Read_KBps\n";
+    file << "Time_Sec,FPS,Frametime_ms,CPU_Usage_Pct,CPU_Temp_C,GPU_Usage_Pct,GPU_Temp_C,VRAM_Used_MB,RAM_Used_MB,Net_DL_KBps,Disk_Read_KBps\n";
     for (const auto& s : samples) {
         file << std::fixed << std::setprecision(3)
              << s.timestamp_sec << ","
@@ -157,6 +160,9 @@ std::string ExportBenchmarkToCSV(const std::vector<TelemetrySample>& samples) {
              << std::setprecision(1)
              << s.cpu_usage << ","
              << s.cpu_temp << ","
+             << s.gpu_usage << ","
+             << s.gpu_temp << ","
+             << s.vram_mb << ","
              << s.ram_mb << ","
              << s.net_kbps << ","
              << s.disk_kbps << "\n";
@@ -221,6 +227,7 @@ int main() {
 
     const int MAX_HARDWARE_SAMPLES = 100;
     std::vector<float> cpu_history(MAX_HARDWARE_SAMPLES, 0.0f);
+    std::vector<float> gpu_history(MAX_HARDWARE_SAMPLES, 0.0f);
     std::vector<float> ram_history(MAX_HARDWARE_SAMPLES, 0.0f);
     std::vector<float> net_dl_history(MAX_HARDWARE_SAMPLES, 0.0f);
     std::vector<float> disk_read_history(MAX_HARDWARE_SAMPLES, 0.0f);
@@ -236,17 +243,18 @@ int main() {
     float current_frametime_ms = 0.0f;
     float fps_1percent_low = 0.0f;
     float current_temp = 0.0f;
+    GpuMetrics current_gpu;
 
     bool is_hud_mode = false;
     bool f12_pressed_prev = false;
 
-    // Estado del HUD: Dimensiones iniciales ampliadas (330x110) para alojar las 3 líneas holgadamente
+    // Estado del HUD: Tamaño ajustado (340x135) para contener las 4 filas holgadamente
     int hud_win_x = 25;
     int hud_win_y = 25;
-    int hud_win_w = 330;
-    int hud_win_h = 110;
+    int hud_win_w = 340;
+    int hud_win_h = 135;
 
-    // Arrastre dinámico por pantalla
+    // Arrastre dinámico
     bool is_dragging_hud = false;
     double drag_start_offset_x = 0.0;
     double drag_start_offset_y = 0.0;
@@ -268,7 +276,7 @@ int main() {
 
         double now = glfwGetTime();
 
-        // 1. CONMUTACIÓN DE MODO HUD CON F12
+        // 1. CONMUTACIÓN MODO HUD CON F12
         bool f12_pressed_now = (glfwGetKey(window, GLFW_KEY_F12) == GLFW_PRESS);
         if (f12_pressed_now && !f12_pressed_prev) {
             is_hud_mode = !is_hud_mode;
@@ -322,7 +330,7 @@ int main() {
         }
         f11_pressed_prev = f11_pressed_now;
 
-        // Guardia de seguridad para redimensionado en Linux (Dashboard)
+        // Guardia de seguridad para Linux (Dashboard)
         if (!is_hud_mode) {
             int current_w, current_h;
             glfwGetWindowSize(window, &current_w, &current_h);
@@ -353,6 +361,9 @@ int main() {
                 sample.frametime_ms = current_frametime_ms;
                 sample.cpu_usage = cpu_history.empty() ? 0.0f : cpu_history.back();
                 sample.cpu_temp = current_temp;
+                sample.gpu_usage = current_gpu.usage_pct;
+                sample.gpu_temp = current_gpu.temp_c;
+                sample.vram_mb = current_gpu.vram_used_mb;
                 sample.ram_mb = ram_history.empty() ? 0.0f : ram_history.back();
                 sample.net_kbps = net_dl_history.empty() ? 0.0f : net_dl_history.back();
                 sample.disk_kbps = disk_read_history.empty() ? 0.0f : disk_read_history.back();
@@ -366,11 +377,15 @@ int main() {
             float cpu = monitor.getCpuUsage();
             float ram = static_cast<float>(monitor.getRamUsageMB());
             current_temp = monitor.getCpuTemperature();
+            current_gpu = monitor.getGpuMetrics();
             NetworkMetrics net = monitor.getNetworkIO();
             DiskMetrics disk = monitor.getDiskIO();
 
             std::rotate(cpu_history.begin(), cpu_history.begin() + 1, cpu_history.end());
             cpu_history.back() = cpu;
+
+            std::rotate(gpu_history.begin(), gpu_history.begin() + 1, gpu_history.end());
+            gpu_history.back() = current_gpu.usage_pct;
 
             std::rotate(ram_history.begin(), ram_history.begin() + 1, ram_history.end());
             ram_history.back() = ram;
@@ -393,10 +408,9 @@ int main() {
         ImGui::NewFrame();
 
         if (is_hud_mode) {
-            // --- MODO 1: MICRO-HUD OVERLAY (ARRASTRABLE Y REDIMENSIONABLE) ---
+            // --- MODO 1: MICRO-HUD OVERLAY INTERACTIVO ---
             ImGui::SetNextWindowPos(ImVec2(0, 0));
-            // Restricción mínima actualizada (260x95)
-            ImGui::SetNextWindowSizeConstraints(ImVec2(260, 95), ImVec2(650, 350));
+            ImGui::SetNextWindowSizeConstraints(ImVec2(280, 120), ImVec2(700, 400));
 
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 8));
             ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
@@ -413,12 +427,12 @@ int main() {
 
             ImGui::Begin("HUD_CompactPill", nullptr, hud_flags);
             
-            // Fila 0: Barra de Arrastre / Marca
+            // Fila 0: Barra de Arrastre
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.4f, 0.5f, 1.0f));
             ImGui::TextUnformatted(":: GAMEPERFTRACE");
             ImGui::PopStyleColor();
 
-            // Lógica de movimiento con arrastre de ratón
+            // Lógica de movimiento con el ratón
             double cx, cy;
             glfwGetCursorPos(window, &cx, &cy);
 
@@ -442,7 +456,7 @@ int main() {
                 }
             }
 
-            // Lógica de redimensionado dinámico con la ventana GLFW
+            // Sincronización de redimensionado GLFW / ImGui
             ImVec2 current_imgui_size = ImGui::GetWindowSize();
             int cur_glfw_w, cur_glfw_h;
             glfwGetWindowSize(window, &cur_glfw_w, &cur_glfw_h);
@@ -470,6 +484,21 @@ int main() {
             if (current_temp > 0.0f) {
                 ImGui::SameLine();
                 ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "| %.0f°C", current_temp);
+            }
+
+            // Fila 3: GPU % y VRAM (Si está disponible)
+            if (current_gpu.available) {
+                ImGui::TextColored(ImVec4(0.8f, 0.4f, 1.0f, 1.0f), "GPU: %.0f%%", current_gpu.usage_pct);
+                if (current_gpu.temp_c > 0.0f) {
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "| %.0f°C", current_gpu.temp_c);
+                }
+                if (current_gpu.vram_used_mb > 0.0f) {
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "| VRAM: %.0fMB", current_gpu.vram_used_mb);
+                }
+            } else {
+                ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "GPU: N/A");
             }
 
             ImGui::End();
@@ -514,13 +543,27 @@ int main() {
                 ImGui::Spacing();
             }
 
-            // Tarjetas KPI
-            ImGui::Columns(4, "kpis", false);
+            // Tarjetas KPI de Hardware (5 Columnas)
+            ImGui::Columns(5, "kpis", false);
 
             char cpu_val[32];
             if (current_temp > 0.0f) snprintf(cpu_val, sizeof(cpu_val), "%.1f%% (%.0f°C)", cpu_history.back(), current_temp);
             else snprintf(cpu_val, sizeof(cpu_val), "%.1f%%", cpu_history.back());
             RenderKpiCard("PROCESADOR (CPU)", cpu_val, cpu_history.back() > 85.0f ? "Pico de Carga" : "Carga Normal", ImVec4(0.2f, 0.7f, 1.0f, 1.0f));
+
+            ImGui::NextColumn();
+
+            char gpu_val[64];
+            if (current_gpu.available) {
+                if (current_gpu.temp_c > 0.0f) snprintf(gpu_val, sizeof(gpu_val), "%.1f%% (%.0f°C)", current_gpu.usage_pct, current_gpu.temp_c);
+                else snprintf(gpu_val, sizeof(gpu_val), "%.1f%%", current_gpu.usage_pct);
+            } else {
+                snprintf(gpu_val, sizeof(gpu_val), "No detectada");
+            }
+            char gpu_st[64];
+            if (current_gpu.vram_total_mb > 0.0f) snprintf(gpu_st, sizeof(gpu_st), "VRAM: %.0f/%.0f MB", current_gpu.vram_used_mb, current_gpu.vram_total_mb);
+            else snprintf(gpu_st, sizeof(gpu_st), "Driver Activo");
+            RenderKpiCard("GRAFICA (GPU)", gpu_val, gpu_st, ImVec4(0.8f, 0.4f, 1.0f, 1.0f));
 
             ImGui::NextColumn();
 
@@ -567,10 +610,10 @@ int main() {
 
                     ImGui::NextColumn();
 
-                    char cpu_lbl[64];
-                    snprintf(cpu_lbl, sizeof(cpu_lbl), "CPU Load: %.1f%%", cpu_history.back());
-                    ImGui::PushStyleColor(ImGuiCol_PlotLines, ImVec4(0.2f, 0.7f, 1.0f, 1.0f));
-                    ImGui::PlotLines("##CPU", cpu_history.data(), MAX_HARDWARE_SAMPLES, 0, cpu_lbl, 0.0f, 100.0f, ImVec2(-1, dynamic_plot_height));
+                    char gpu_lbl[64];
+                    snprintf(gpu_lbl, sizeof(gpu_lbl), "GPU Load: %.1f%%", gpu_history.back());
+                    ImGui::PushStyleColor(ImGuiCol_PlotLines, ImVec4(0.8f, 0.4f, 1.0f, 1.0f));
+                    ImGui::PlotLines("##GPU", gpu_history.data(), MAX_HARDWARE_SAMPLES, 0, gpu_lbl, 0.0f, 100.0f, ImVec2(-1, dynamic_plot_height));
                     ImGui::PopStyleColor();
 
                     ImGui::Columns(1);
@@ -578,20 +621,18 @@ int main() {
 
                     ImGui::Columns(2, "row2", false);
 
-                    char ram_lbl[64];
-                    snprintf(ram_lbl, sizeof(ram_lbl), "RAM Used: %.0f / %lu MB", ram_history.back(), specs.total_ram_mb);
-                    ImGui::PushStyleColor(ImGuiCol_PlotLines, ImVec4(0.7f, 0.3f, 1.0f, 1.0f));
-                    ImGui::PlotLines("##RAM", ram_history.data(), MAX_HARDWARE_SAMPLES, 0, ram_lbl, 0.0f, static_cast<float>(specs.total_ram_mb), ImVec2(-1, dynamic_plot_height));
+                    char cpu_lbl[64];
+                    snprintf(cpu_lbl, sizeof(cpu_lbl), "CPU Load: %.1f%%", cpu_history.back());
+                    ImGui::PushStyleColor(ImGuiCol_PlotLines, ImVec4(0.2f, 0.7f, 1.0f, 1.0f));
+                    ImGui::PlotLines("##CPU", cpu_history.data(), MAX_HARDWARE_SAMPLES, 0, cpu_lbl, 0.0f, 100.0f, ImVec2(-1, dynamic_plot_height));
                     ImGui::PopStyleColor();
 
                     ImGui::NextColumn();
 
-                    float max_net = *std::max_element(net_dl_history.begin(), net_dl_history.end());
-                    float net_scale = std::max(500.0f, max_net * 1.2f);
-                    std::string net_lbl = "Red Descarga: " + formatRate(net_dl_history.back());
-                    
-                    ImGui::PushStyleColor(ImGuiCol_PlotLines, ImVec4(0.2f, 0.9f, 0.5f, 1.0f));
-                    ImGui::PlotLines("##NET", net_dl_history.data(), MAX_HARDWARE_SAMPLES, 0, net_lbl.c_str(), 0.0f, net_scale, ImVec2(-1, dynamic_plot_height));
+                    char ram_lbl[64];
+                    snprintf(ram_lbl, sizeof(ram_lbl), "RAM Used: %.0f / %lu MB", ram_history.back(), specs.total_ram_mb);
+                    ImGui::PushStyleColor(ImGuiCol_PlotLines, ImVec4(0.7f, 0.3f, 1.0f, 1.0f));
+                    ImGui::PlotLines("##RAM", ram_history.data(), MAX_HARDWARE_SAMPLES, 0, ram_lbl, 0.0f, static_cast<float>(specs.total_ram_mb), ImVec2(-1, dynamic_plot_height));
                     ImGui::PopStyleColor();
 
                     ImGui::Columns(1);
@@ -610,6 +651,7 @@ int main() {
                     }
 
                     if (ImGui::CollapsingHeader(" Tarjeta Grafica (GPU)", ImGuiTreeNodeFlags_DefaultOpen)) {
+                        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "Nombre GPU Detectada: "); ImGui::SameLine(); ImGui::Text("%s", current_gpu.name.c_str());
                         ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "Ensamblador GPU: "); ImGui::SameLine(); ImGui::Text("%s", specs.gpu_vendor.c_str());
                         ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "Modelo Renderer: "); ImGui::SameLine(); ImGui::Text("%s", specs.gpu_renderer.c_str());
                         ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "Driver OpenGL: "); ImGui::SameLine(); ImGui::Text("%s", specs.gpu_version.c_str());

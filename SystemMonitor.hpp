@@ -1,17 +1,7 @@
-#ifndef SYSTEM_MONITOR_HPP
-#define SYSTEM_MONITOR_HPP
-
-#include <cstdint>
+#pragma once
 #include <string>
 #include <vector>
-#include <thread>
-#include <chrono>
-
-struct StorageDrive {
-    std::string mount_point;
-    uint64_t total_gb = 0;
-    uint64_t free_gb = 0;
-};
+#include <cstdint>
 
 struct NetworkMetrics {
     float download_kbps = 0.0f;
@@ -23,66 +13,74 @@ struct DiskMetrics {
     float write_kbps = 0.0f;
 };
 
+struct GpuMetrics {
+    float usage_pct = 0.0f;
+    float vram_used_mb = 0.0f;
+    float vram_total_mb = 0.0f;
+    float temp_c = 0.0f;
+    std::string name = "Desconocido";
+    bool available = false;
+};
+
+struct DiskDriveInfo {
+    std::string mount_point;
+    uint64_t total_gb = 0;
+    uint64_t free_gb = 0;
+};
+
 struct SystemInfo {
-    // CPU
-    std::string cpu_model = "Desconocido";
-    std::string cpu_vendor = "Desconocido";
-    std::string cpu_cache_l3 = "Desconocido";
-    std::string cpu_freq_mhz = "Desconocido";
-    unsigned int cpu_cores = 1;
+    std::string cpu_model;
+    std::string cpu_vendor;
+    uint32_t cpu_cores = 0;
+    std::string cpu_freq_mhz;
+    std::string cpu_cache_l3;
+    
+    std::string gpu_vendor;
+    std::string gpu_renderer;
+    std::string gpu_version;
+    std::string gpu_glsl_version;
 
-    // GPU (Se completa con OpenGL en runtime)
-    std::string gpu_vendor = "Desconocido";
-    std::string gpu_renderer = "Desconocido";
-    std::string gpu_version = "Desconocido";
-    std::string gpu_glsl_version = "Desconocido";
-
-    // OS & Kernel
-    std::string os_name = "Desconocido";
-    std::string kernel_version = "Desconocido";
-    std::string hostname = "Desconocido";
-    std::string architecture = "Desconocido";
-
-    // RAM & Swap
     uint64_t total_ram_mb = 0;
     uint64_t total_swap_mb = 0;
+    
+    std::string os_name;
+    std::string kernel_version;
+    std::string architecture;
+    std::string hostname;
 
-    // Storage
-    std::vector<StorageDrive> drives;
+    std::vector<DiskDriveInfo> drives;
 };
 
 class SystemMonitor {
 public:
     SystemMonitor();
-    
-    uint64_t getRamUsageMB();
+    ~SystemMonitor();
+
     float getCpuUsage();
-    unsigned int getCpuCores();
+    float getRamUsageMB();
     float getCpuTemperature();
-    uint64_t getUptimeSeconds();
-    
-    SystemInfo getStaticSystemInfo();
     NetworkMetrics getNetworkIO();
     DiskMetrics getDiskIO();
+    GpuMetrics getGpuMetrics();
+    SystemInfo getStaticSystemInfo();
+    uint64_t getUptimeSeconds();
 
 private:
-#ifdef _WIN32
-    uint64_t prev_idle_time = 0;
-    uint64_t prev_kernel_time = 0;
-    uint64_t prev_user_time = 0;
-#else
-    uint64_t prev_user = 0, prev_nice = 0, prev_system = 0, prev_idle = 0;
-    uint64_t prev_iowait = 0, prev_irq = 0, prev_softirq = 0, prev_steal = 0;
+    uint64_t last_idle_time = 0;
+    uint64_t last_total_time = 0;
 
-    uint64_t prev_rx_bytes = 0;
-    uint64_t prev_tx_bytes = 0;
-    uint64_t prev_read_bytes = 0;
-    uint64_t prev_write_bytes = 0;
-    std::chrono::steady_clock::time_point last_net_time;
-    std::chrono::steady_clock::time_point last_disk_time;
-#endif
+    uint64_t last_net_rx = 0;
+    uint64_t last_net_tx = 0;
+    double last_net_time = 0.0;
 
-    uint64_t fileTimeToUint64(const void* ft);
+    uint64_t last_disk_read = 0;
+    uint64_t last_disk_write = 0;
+    double last_disk_time = 0.0;
+
+    // Gestor dinámico NVML para NVIDIA
+    void* nvml_handle = nullptr;
+    bool nvml_initialized = false;
+    void initNvml();
+    GpuMetrics getNvidiaGpuMetrics();
+    GpuMetrics getAmdIntelGpuMetrics();
 };
-
-#endif

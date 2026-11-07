@@ -8,8 +8,13 @@
 #include <cstring>
 
 #ifdef _WIN32
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#endif
+#include <winsock2.h>
 #include <windows.h>
 #include <iphlpapi.h>
+#include <netioapi.h>
 #include <comdef.h>
 #include <Wbemidl.h>
 #include <dxgi1_4.h>

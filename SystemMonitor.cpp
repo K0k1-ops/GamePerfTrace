@@ -2,18 +2,27 @@
 #include <fstream>
 #include <sstream>
 #include <iostream>
+#include <algorithm>
+#include <filesystem>
+#include <chrono>
+#include <cstring>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <winternl.h>
+#include <comdef.h>
+#include <Wbemidl.h>
+#pragma comment(lib, "wbemuuid.lib")
+#else
 #include <unistd.h>
 #include <sys/sysinfo.h>
 #include <sys/statvfs.h>
 #include <sys/utsname.h>
-#include <filesystem>
-#include <chrono>
 #include <dlfcn.h>
-#include <cstring>
+#endif
 
 namespace fs = std::filesystem;
 
-// Definición de tipos de funciones de NVML para carga dinámica
 typedef int (*pfn_nvmlInit)(void);
 typedef int (*pfn_nvmlShutdown)(void);
 typedef int (*pfn_nvmlDeviceGetHandleByIndex)(unsigned int, void**);
@@ -41,14 +50,17 @@ SystemMonitor::SystemMonitor() {
 }
 
 SystemMonitor::~SystemMonitor() {
+#ifndef _WIN32
     if (nvml_handle && nvml_initialized) {
         auto pnvmlShutdown = (pfn_nvmlShutdown)dlsym(nvml_handle, "nvmlShutdown");
         if (pnvmlShutdown) pnvmlShutdown();
         dlclose(nvml_handle);
     }
+#endif
 }
 
 void SystemMonitor::initNvml() {
+#ifndef _WIN32
     nvml_handle = dlopen("libnvidia-ml.so.1", RTLD_LAZY);
     if (!nvml_handle) {
         nvml_handle = dlopen("libnvidia-ml.so", RTLD_LAZY);
@@ -62,10 +74,12 @@ void SystemMonitor::initNvml() {
             nvml_initialized = true;
         }
     }
+#endif
 }
 
 GpuMetrics SystemMonitor::getNvidiaGpuMetrics() {
     GpuMetrics gpu;
+#ifndef _WIN32
     if (!nvml_initialized || !nvml_handle) return gpu;
 
     auto pGetHandle = (pfn_nvmlDeviceGetHandleByIndex)dlsym(nvml_handle, "nvmlDeviceGetHandleByIndex_v2");
@@ -107,22 +121,31 @@ GpuMetrics SystemMonitor::getNvidiaGpuMetrics() {
             }
         }
     }
-
+#endif
     return gpu;
 }
 
 GpuMetrics SystemMonitor::getAmdIntelGpuMetrics() {
     GpuMetrics gpu;
-
+#ifndef _WIN32
     for (int i = 0; i < 4; ++i) {
         std::string base_path = "/sys/class/drm/card" + std::to_string(i) + "/device/";
-        std::string busy_file = base_path + "gpu_busy_percent";
+        if (!fs::exists(base_path)) continue;
 
+        std::string vendor_file = base_path + "vendor";
+        std::string vendor_id = "";
+        if (fs::exists(vendor_file)) {
+            std::ifstream fv(vendor_file);
+            fv >> vendor_id;
+        }
+
+        // 1. Detección AMD (amdgpu sysfs)
+        std::string busy_file = base_path + "gpu_busy_percent";
         if (fs::exists(busy_file)) {
             std::ifstream fbusy(busy_file);
-            if (fbusy.is_open()) {
-                fbusy >> gpu.usage_pct;
+            if (fbusy >> gpu.usage_pct) {
                 gpu.available = true;
+                gpu.name = "AMD GPU";
             }
 
             std::string vram_used_file = base_path + "mem_info_vram_used";
@@ -131,20 +154,14 @@ GpuMetrics SystemMonitor::getAmdIntelGpuMetrics() {
             if (fs::exists(vram_used_file)) {
                 std::ifstream fused(vram_used_file);
                 uint64_t bytes_used = 0;
-                if (fused >> bytes_used) {
-                    gpu.vram_used_mb = static_cast<float>(bytes_used / (1024 * 1024));
-                }
+                if (fused >> bytes_used) gpu.vram_used_mb = static_cast<float>(bytes_used / (1024 * 1024));
             }
-
             if (fs::exists(vram_total_file)) {
                 std::ifstream ftot(vram_total_file);
                 uint64_t bytes_tot = 0;
-                if (ftot >> bytes_tot) {
-                    gpu.vram_total_mb = static_cast<float>(bytes_tot / (1024 * 1024));
-                }
+                if (ftot >> bytes_tot) gpu.vram_total_mb = static_cast<float>(bytes_tot / (1024 * 1024));
             }
 
-            // Lectura de temperatura del HWMon de la GPU
             std::string hwmon_dir = base_path + "hwmon/";
             if (fs::exists(hwmon_dir)) {
                 for (const auto& entry : fs::directory_iterator(hwmon_dir)) {
@@ -152,19 +169,54 @@ GpuMetrics SystemMonitor::getAmdIntelGpuMetrics() {
                     if (fs::exists(temp_file)) {
                         std::ifstream ftemp(temp_file);
                         float raw_temp = 0.0f;
-                        if (ftemp >> raw_temp) {
-                            gpu.temp_c = raw_temp / 1000.0f;
-                        }
+                        if (ftemp >> raw_temp) gpu.temp_c = raw_temp / 1000.0f;
                         break;
                     }
                 }
             }
-
-            gpu.name = "AMD/Intel GPU";
             break;
         }
-    }
 
+        // 2. Detección Intel iGPU / Arc (controladores i915 y xe)
+        std::string gt_act_freq = "/sys/class/drm/card" + std::to_string(i) + "/gt/gt0/gt_act_freq_mhz";
+        std::string rps_act_freq = "/sys/class/drm/card" + std::to_string(i) + "/gt/gt0/rps_act_freq_mhz";
+        std::string rps_max_freq = "/sys/class/drm/card" + std::to_string(i) + "/gt/gt0/rps_max_freq_mhz";
+        std::string gt_max_freq = "/sys/class/drm/card" + std::to_string(i) + "/gt/gt0/gt_max_freq_mhz";
+
+        std::string act_path = fs::exists(gt_act_freq) ? gt_act_freq : (fs::exists(rps_act_freq) ? rps_act_freq : "");
+        std::string max_path = fs::exists(rps_max_freq) ? rps_max_freq : (fs::exists(gt_max_freq) ? gt_max_freq : "");
+
+        if (!act_path.empty() && !max_path.empty()) {
+            std::ifstream fact(act_path), fmax(max_path);
+            float act = 0.0f, max_f = 0.0f;
+            if (fact >> act && fmax >> max_f && max_f > 0.0f) {
+                gpu.usage_pct = std::min(100.0f, (act / max_f) * 100.0f);
+                gpu.available = true;
+                gpu.name = "Intel Graphics";
+            }
+        } else if (vendor_id == "0x8086") {
+            gpu.available = true;
+            gpu.name = "Intel iGPU";
+            gpu.usage_pct = 0.0f;
+        }
+
+        std::string intel_mem_used = "/sys/class/drm/card" + std::to_string(i) + "/memory/used";
+        if (fs::exists(intel_mem_used)) {
+            std::ifstream fmem(intel_mem_used);
+            float mem_mb = 0.0f;
+            if (fmem >> mem_mb) gpu.vram_used_mb = mem_mb;
+        }
+
+        std::string intel_temp = "/sys/class/drm/card" + std::to_string(i) + "/thermal_zone0/temp";
+        if (fs::exists(intel_temp)) {
+            std::ifstream ftemp(intel_temp);
+            float raw_temp = 0.0f;
+            if (ftemp >> raw_temp) gpu.temp_c = raw_temp > 1000.0f ? raw_temp / 1000.0f : raw_temp;
+        }
+
+        if (gpu.available) break;
+    }
+#endif
     return gpu;
 }
 
@@ -176,41 +228,41 @@ GpuMetrics SystemMonitor::getGpuMetrics() {
     return getAmdIntelGpuMetrics();
 }
 
-float SystemMonitor::getCpuUsage() {
-    std::ifstream file("/proc/stat");
-    if (!file.is_open()) return 0.0f;
-
-    std::string line;
-    std::getline(file, line);
-    std::istringstream ss(line);
-
-    std::string cpu;
-    uint64_t user, nice, system, idle, iowait, irq, softirq, steal;
-    ss >> cpu >> user >> nice >> system >> idle >> iowait >> irq >> softirq >> steal;
-
-    uint64_t current_idle = idle + iowait;
-    uint64_t current_total = user + nice + system + idle + iowait + irq + softirq + steal;
-
-    uint64_t total_diff = current_total - last_total_time;
-    uint64_t idle_diff = current_idle - last_idle_time;
-
-    last_idle_time = current_idle;
-    last_total_time = current_total;
-
-    if (total_diff == 0) return 0.0f;
-    return static_cast<float>(total_diff - idle_diff) / static_cast<float>(total_diff) * 100.0f;
-}
-
-float SystemMonitor::getRamUsageMB() {
-    struct sysinfo info;
-    if (sysinfo(&info) == 0) {
-        uint64_t used_ram = info.totalram - info.freeram - info.bufferram;
-        return static_cast<float>(used_ram * info.mem_unit) / (1024.0f * 1024.0f);
-    }
-    return 0.0f;
-}
-
 float SystemMonitor::getCpuTemperature() {
+#ifdef _WIN32
+    // Lectura de WMI para Windows (MSAcpi_ThermalZoneTemperature)
+    float temp = 0.0f;
+    HRESULT hres = CoInitializeEx(0, COINIT_MULTITHREADED);
+    IWbemLocator *pLoc = NULL;
+    HRESULT hr = CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (LPVOID *)&pLoc);
+    if (SUCCEEDED(hr)) {
+        IWbemServices *pSvc = NULL;
+        hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\WMI"), NULL, NULL, 0, NULL, 0, 0, &pSvc);
+        if (SUCCEEDED(hr)) {
+            IEnumWbemClassObject* pEnumerator = NULL;
+            hr = pSvc->ExecQuery(bstr_t("WQL"), bstr_t("SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature"),
+                WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnumerator);
+            if (SUCCEEDED(hr) && pEnumerator) {
+                IWbemClassObject *pclsObj = NULL;
+                ULONG uReturn = 0;
+                if (pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK && uReturn > 0) {
+                    VARIANT vtProp;
+                    if (SUCCEEDED(pclsObj->Get(L"CurrentTemperature", 0, &vtProp, 0, 0))) {
+                        float decikelvin = static_cast<float>(vtProp.ulVal);
+                        temp = (decikelvin - 2732.0f) / 10.0f;
+                        VariantClear(&vtProp);
+                    }
+                    pclsObj->Release();
+                }
+                pEnumerator->Release();
+            }
+            pSvc->Release();
+        }
+        pLoc->Release();
+    }
+    CoUninitialize();
+    return temp > 0.0f ? temp : 0.0f;
+#else
     std::string thermal_dir = "/sys/class/thermal/";
     if (!fs::exists(thermal_dir)) return 0.0f;
 
@@ -234,10 +286,80 @@ float SystemMonitor::getCpuTemperature() {
         }
     }
     return 0.0f;
+#endif
+}
+
+float SystemMonitor::getCpuUsage() {
+#ifdef _WIN32
+    static FILETIME prev_idle, prev_kernel, prev_user;
+    FILETIME idle, kernel, user;
+    if (GetSystemTimes(&idle, &kernel, &user)) {
+        ULARGE_INTEGER i, k, u, pi, pk, pu;
+        i.LowPart = idle.dwLowDateTime; i.HighPart = idle.dwHighDateTime;
+        k.LowPart = kernel.dwLowDateTime; k.HighPart = kernel.dwHighDateTime;
+        u.LowPart = user.dwLowDateTime; u.HighPart = user.dwHighDateTime;
+        pi.LowPart = prev_idle.dwLowDateTime; pi.HighPart = prev_idle.dwHighDateTime;
+        pk.LowPart = prev_kernel.dwLowDateTime; pk.HighPart = prev_kernel.dwHighDateTime;
+        pu.LowPart = prev_user.dwLowDateTime; pu.HighPart = prev_user.dwHighDateTime;
+
+        ULONGLONG usr_diff = u.QuadPart - pu.QuadPart;
+        ULONGLONG ker_diff = k.QuadPart - pk.QuadPart;
+        ULONGLONG idl_diff = i.QuadPart - pi.QuadPart;
+        ULONGLONG total_diff = usr_diff + ker_diff;
+
+        prev_idle = idle; prev_kernel = kernel; prev_user = user;
+
+        if (total_diff > 0) {
+            return static_cast<float>((total_diff - idl_diff) * 100.0 / total_diff);
+        }
+    }
+    return 0.0f;
+#else
+    std::ifstream file("/proc/stat");
+    if (!file.is_open()) return 0.0f;
+
+    std::string line;
+    std::getline(file, line);
+    std::istringstream ss(line);
+
+    std::string cpu;
+    uint64_t user, nice, system, idle, iowait, irq, softirq, steal;
+    ss >> cpu >> user >> nice >> system >> idle >> iowait >> irq >> softirq >> steal;
+
+    uint64_t current_idle = idle + iowait;
+    uint64_t current_total = user + nice + system + idle + iowait + irq + softirq + steal;
+
+    uint64_t total_diff = current_total - last_total_time;
+    uint64_t idle_diff = current_idle - last_idle_time;
+
+    last_idle_time = current_idle;
+    last_total_time = current_total;
+
+    if (total_diff == 0) return 0.0f;
+    return static_cast<float>(total_diff - idle_diff) / static_cast<float>(total_diff) * 100.0f;
+#endif
+}
+
+float SystemMonitor::getRamUsageMB() {
+#ifdef _WIN32
+    MEMORYSTATUSEX memInfo;
+    memInfo.dwLength = sizeof(MEMORYSTATUSEX);
+    GlobalMemoryStatusEx(&memInfo);
+    DWORDLONG physMemUsed = memInfo.ullTotalPhys - memInfo.ullAvailPhys;
+    return static_cast<float>(physMemUsed / (1024 * 1024));
+#else
+    struct sysinfo info;
+    if (sysinfo(&info) == 0) {
+        uint64_t used_ram = info.totalram - info.freeram - info.bufferram;
+        return static_cast<float>(used_ram * info.mem_unit) / (1024.0f * 1024.0f);
+    }
+    return 0.0f;
+#endif
 }
 
 NetworkMetrics SystemMonitor::getNetworkIO() {
     NetworkMetrics metrics;
+#ifndef _WIN32
     std::ifstream file("/proc/net/dev");
     if (!file.is_open()) return metrics;
 
@@ -275,12 +397,13 @@ NetworkMetrics SystemMonitor::getNetworkIO() {
     last_net_rx = total_rx;
     last_net_tx = total_tx;
     last_net_time = current_time;
-
+#endif
     return metrics;
 }
 
 DiskMetrics SystemMonitor::getDiskIO() {
     DiskMetrics metrics;
+#ifndef _WIN32
     std::ifstream file("/proc/diskstats");
     if (!file.is_open()) return metrics;
 
@@ -316,13 +439,13 @@ DiskMetrics SystemMonitor::getDiskIO() {
     last_disk_read = total_read_sectors;
     last_disk_write = total_write_sectors;
     last_disk_time = current_time;
-
+#endif
     return metrics;
 }
 
 SystemInfo SystemMonitor::getStaticSystemInfo() {
     SystemInfo info;
-
+#ifndef _WIN32
     std::ifstream cpu_file("/proc/cpuinfo");
     std::string line;
     uint32_t cores = 0;
@@ -391,14 +514,21 @@ SystemInfo SystemMonitor::getStaticSystemInfo() {
             }
         }
     }
-
+#else
+    info.os_name = "Windows";
+    info.cpu_model = "Windows PC CPU";
+#endif
     return info;
 }
 
 uint64_t SystemMonitor::getUptimeSeconds() {
+#ifdef _WIN32
+    return GetTickCount64() / 1000;
+#else
     struct sysinfo info;
     if (sysinfo(&info) == 0) {
         return info.uptime;
     }
     return 0;
+#endif
 }

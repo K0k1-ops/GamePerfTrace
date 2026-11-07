@@ -77,7 +77,6 @@ private:
     uint64_t last_disk_write = 0;
     double last_disk_time = 0.0;
 
-    // Gestor dinámico NVML para NVIDIA
     void* nvml_handle = nullptr;
     bool nvml_initialized = false;
     void initNvml();

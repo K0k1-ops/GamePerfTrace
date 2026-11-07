@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 
-# 1. Configurar GLFW sin tests ni ejemplos innecesarios
+# 1. Configurar GLFW
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
@@ -51,7 +51,7 @@ find_package(OpenGL REQUIRED)
 
 if(WIN32)
     set_target_properties(GamePerfTrace PROPERTIES WIN32_EXECUTABLE TRUE)
-    target_link_libraries(GamePerfTrace PRIVATE glfw OpenGL::GL)
+    target_link_libraries(GamePerfTrace PRIVATE glfw OpenGL::GL iphlpapi wbemuuid dxgi)
 else()
-    target_link_libraries(GamePerfTrace PRIVATE glfw OpenGL::GL pthread dl)
+    target_link_libraries(GamePerfTrace PRIVATE glfw OpenGL::GL pthread dl X11)
 endif()

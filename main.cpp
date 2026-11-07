@@ -23,6 +23,60 @@
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <X11/Xlib.h>
+#include <X11/keysym.h>
+
+struct LinuxGlobalKeyMonitor {
+    Display* dpy = nullptr;
+
+    LinuxGlobalKeyMonitor() {
+        dpy = XOpenDisplay(NULL);
+    }
+    ~LinuxGlobalKeyMonitor() {
+        if (dpy) XCloseDisplay(dpy);
+    }
+
+    bool isKeyPressed(KeySym sym) {
+        if (!dpy) return false;
+        char keys[32];
+        XQueryKeymap(dpy, keys);
+        KeyCode kc = XKeysymToKeycode(dpy, sym);
+        if (kc == 0) return false;
+        return (keys[kc >> 3] & (1 << (kc & 7))) != 0;
+    }
+};
+
+static LinuxGlobalKeyMonitor g_linux_keys;
+#endif
+
+// Funciones para consultar el estado global de F12 y F11 sin depender del foco de la ventana
+bool IsGlobalF12Pressed(GLFWwindow* window) {
+#ifdef _WIN32
+    bool win_state = (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
+    bool glfw_state = (glfwGetKey(window, GLFW_KEY_F12) == GLFW_PRESS);
+    return win_state || glfw_state;
+#else
+    bool linux_state = g_linux_keys.isKeyPressed(XK_F12);
+    bool glfw_state = (glfwGetKey(window, GLFW_KEY_F12) == GLFW_PRESS);
+    return linux_state || glfw_state;
+#endif
+}
+
+bool IsGlobalF11Pressed(GLFWwindow* window) {
+#ifdef _WIN32
+    bool win_state = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
+    bool glfw_state = (glfwGetKey(window, GLFW_KEY_F11) == GLFW_PRESS);
+    return win_state || glfw_state;
+#else
+    bool linux_state = g_linux_keys.isKeyPressed(XK_F11);
+    bool glfw_state = (glfwGetKey(window, GLFW_KEY_F11) == GLFW_PRESS);
+    return linux_state || glfw_state;
+#endif
+}
+
 struct TelemetrySample {
     double timestamp_sec;
     float fps;
@@ -248,7 +302,7 @@ int main() {
     bool is_hud_mode = false;
     bool f12_pressed_prev = false;
 
-    // Estado del HUD: Tamaño ajustado (340x135) para contener las 4 filas holgadamente
+    // Estado del HUD: Posición y tamaño
     int hud_win_x = 25;
     int hud_win_y = 25;
     int hud_win_w = 340;
@@ -276,8 +330,8 @@ int main() {
 
         double now = glfwGetTime();
 
-        // 1. CONMUTACIÓN MODO HUD CON F12
-        bool f12_pressed_now = (glfwGetKey(window, GLFW_KEY_F12) == GLFW_PRESS);
+        // 1. CONMUTACIÓN DE MODO HUD CON F12 GLOBAL
+        bool f12_pressed_now = IsGlobalF12Pressed(window);
         if (f12_pressed_now && !f12_pressed_prev) {
             is_hud_mode = !is_hud_mode;
             
@@ -299,8 +353,8 @@ int main() {
         }
         f12_pressed_prev = f12_pressed_now;
 
-        // 2. ACTIVACIÓN / DESACTIVACIÓN BENCHMARK CON F11
-        bool f11_pressed_now = (glfwGetKey(window, GLFW_KEY_F11) == GLFW_PRESS);
+        // 2. ACTIVACIÓN / DESACTIVACIÓN BENCHMARK CON F11 GLOBAL
+        bool f11_pressed_now = IsGlobalF11Pressed(window);
         if (f11_pressed_now && !f11_pressed_prev) {
             is_benchmarking = !is_benchmarking;
 
@@ -486,7 +540,7 @@ int main() {
                 ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "| %.0f°C", current_temp);
             }
 
-            // Fila 3: GPU % y VRAM (Si está disponible)
+            // Fila 3: GPU % y VRAM
             if (current_gpu.available) {
                 ImGui::TextColored(ImVec4(0.8f, 0.4f, 1.0f, 1.0f), "GPU: %.0f%%", current_gpu.usage_pct);
                 if (current_gpu.temp_c > 0.0f) {
@@ -543,7 +597,7 @@ int main() {
                 ImGui::Spacing();
             }
 
-            // Tarjetas KPI de Hardware (5 Columnas)
+            // Tarjetas KPI
             ImGui::Columns(5, "kpis", false);
 
             char cpu_val[32];

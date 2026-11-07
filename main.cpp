@@ -55,14 +55,12 @@ void RenderKpiCard(const char* title, const char* value, const char* status, ImV
     ImGui::PopStyleColor();
 }
 
-// Carga una fuente vectorial nativa del sistema para evitar desenfoque bitmap
 void LoadCrispSystemFont(ImGuiIO& io, float font_size) {
     ImFontConfig font_config;
     font_config.OversampleH = 4;
     font_config.OversampleV = 4;
     font_config.PixelSnapH = true;
 
-    // Rutas estándar de fuentes vectoriales en Linux y Windows
     const std::vector<std::string> font_paths = {
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
@@ -89,7 +87,6 @@ void LoadCrispSystemFont(ImGuiIO& io, float font_size) {
 int main() {
     if (!glfwInit()) return -1;
 
-    // Configuración de pistas de contexto OpenGL para nitidez de pintado
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
 
@@ -99,7 +96,7 @@ int main() {
         return -1;
     }
     glfwMakeContextCurrent(window);
-    glfwSwapInterval(1);
+    glfwSwapInterval(1); // V-Sync activado para estabilidad de render
 
     glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
 
@@ -107,22 +104,16 @@ int main() {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO(); (void)io;
 
-    // 1. Obtener la escala real del monitor (DPI Scale en Linux/Windows)
     int win_w, win_h, fb_w, fb_h;
     glfwGetWindowSize(window, &win_w, &win_h);
     glfwGetFramebufferSize(window, &fb_w, &fb_h);
     float dpi_scale = (win_w > 0) ? (static_cast<float>(fb_w) / static_cast<float>(win_w)) : 1.0f;
 
-    // 2. Cargar fuente rasterizada directamente al tamaño de píxel nativo (22px * DPI)
     float target_font_size = 22.0f * (dpi_scale > 1.0f ? dpi_scale : 1.0f);
     LoadCrispSystemFont(io, target_font_size);
 
-    // ELIMINADO: io.FontGlobalScale = 2.0f; <-- Esta era la causa de la borrosidad
-
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
-    
-    // 3. Escalar los elementos de la UI de forma vectorial limpia
     style.ScaleAllSizes(dpi_scale > 1.0f ? dpi_scale : 1.2f);
     style.WindowRounding = 0.0f;
     style.FrameRounding = 6.0f;
@@ -146,18 +137,43 @@ int main() {
     std::vector<float> net_dl_history(MAX_SAMPLES, 0.0f);
     std::vector<float> disk_read_history(MAX_SAMPLES, 0.0f);
 
-    double last_time = glfwGetTime();
+    double last_hardware_update = glfwGetTime();
+    
+    // Variables para el cálculo de FPS y Frametime
+    double last_frame_time = glfwGetTime();
+    float current_fps = 0.0f;
+    float current_frametime_ms = 0.0f;
+
+    // Estado del HUD Overlay y Hotkey F12
+    bool show_hud_overlay = true;
+    bool f12_pressed_prev = false;
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
 
-        // 4. Sincronizar dimensiones reales de pintado por frame
+        // 1. Detección de Hotkey F12 para mostrar/ocultar el Overlay
+        bool f12_pressed_now = (glfwGetKey(window, GLFW_KEY_F12) == GLFW_PRESS);
+        if (f12_pressed_now && !f12_pressed_prev) {
+            show_hud_overlay = !show_hud_overlay;
+        }
+        f12_pressed_prev = f12_pressed_now;
+
+        // 2. Cálculo preciso de FPS y Frametime (ms) por frame
+        double now = glfwGetTime();
+        double frame_delta = now - last_frame_time;
+        last_frame_time = now;
+        if (frame_delta > 0.0) {
+            current_fps = static_cast<float>(1.0 / frame_delta);
+            current_frametime_ms = static_cast<float>(frame_delta * 1000.0);
+        }
+
+        // 3. Ajuste de Viewport
         int display_w, display_h;
         glfwGetFramebufferSize(window, &display_w, &display_h);
         glViewport(0, 0, display_w, display_h);
 
-        double current_time = glfwGetTime();
-        if (current_time - last_time >= 0.5) {
+        // 4. Muestreo de Hardware (cada 0.5 segundos)
+        if (now - last_hardware_update >= 0.5) {
             float cpu = monitor.getCpuUsage();
             float ram = static_cast<float>(monitor.getRamUsageMB());
             NetworkMetrics net = monitor.getNetworkIO();
@@ -175,13 +191,14 @@ int main() {
             std::rotate(disk_read_history.begin(), disk_read_history.begin() + 1, disk_read_history.end());
             disk_read_history.back() = disk.read_kbps;
 
-            last_time = current_time;
+            last_hardware_update = now;
         }
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
+        // --- DASHBOARD PRINCIPAL ---
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(io.DisplaySize);
 
@@ -189,8 +206,8 @@ int main() {
 
         // Cabecera Principal
         ImGui::TextColored(ImVec4(0.2f, 0.8f, 1.0f, 1.0f), "GAMEPERFTRACE HARDWARE MONITOR");
-        ImGui::SameLine(ImGui::GetWindowWidth() - 380);
-        ImGui::Text("Encendido: %s", formatUptime(monitor.getUptimeSeconds()).c_str());
+        ImGui::SameLine(ImGui::GetWindowWidth() - 480);
+        ImGui::Text("F12: HUD [%s] | Uptime: %s", show_hud_overlay ? "ON" : "OFF", formatUptime(monitor.getUptimeSeconds()).c_str());
 
         ImGui::Separator();
         ImGui::Spacing();
@@ -337,6 +354,38 @@ int main() {
         }
 
         ImGui::End();
+
+        // --- 5. OVERLAY FLOTANTE COMPACTO (HUD) ---
+        if (show_hud_overlay) {
+            ImGui::SetNextWindowPos(ImVec2(15, 15), ImGuiCond_Always);
+            ImGui::SetNextWindowBgAlpha(0.75f); // Fondo translúcido tipo HUD de juegos
+            
+            ImGuiWindowFlags hud_flags = ImGuiWindowFlags_NoDecoration | 
+                                         ImGuiWindowFlags_AlwaysAutoResize | 
+                                         ImGuiWindowFlags_NoSavedSettings | 
+                                         ImGuiWindowFlags_NoFocusOnAppearing | 
+                                         ImGuiWindowFlags_NoNav | 
+                                         ImGuiWindowFlags_NoMove;
+
+            ImGui::Begin("HUD_Overlay", nullptr, hud_flags);
+            
+            // FPS & Frametime
+            ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.4f, 1.0f), "FPS: %.0f (%.1f ms)", current_fps, current_frametime_ms);
+            ImGui::Separator();
+            
+            // CPU & Temperatura
+            if (temp > 0.0f) {
+                ImGui::Text("CPU: %.1f%% (%.0f°C)", cpu_history.back(), temp);
+            } else {
+                ImGui::Text("CPU: %.1f%%", cpu_history.back());
+            }
+            
+            // RAM & Red
+            ImGui::Text("RAM: %.0f MB", ram_history.back());
+            ImGui::Text("NET: %s", formatRate(net_dl_history.back()).c_str());
+            
+            ImGui::End();
+        }
 
         ImGui::Render();
         

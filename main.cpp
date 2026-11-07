@@ -12,12 +12,28 @@
 #include <cmath>
 #include <fstream>
 #include <numeric>
+#include <chrono>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
 #include "SystemMonitor.hpp"
 
 #include <GLFW/glfw3.h>
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
+
+// Estructura de muestra para el exportador de telemetría a CSV
+struct TelemetrySample {
+    double timestamp_sec;
+    float fps;
+    float frametime_ms;
+    float cpu_usage;
+    float cpu_temp;
+    float ram_mb;
+    float net_kbps;
+    float disk_kbps;
+};
 
 std::string formatRate(float kbps) {
     char buffer[32];
@@ -100,7 +116,6 @@ float CalculateLowFPS(const std::vector<float>& ft_buffer, float percentile) {
     return (avg_worst_ms > 0.0) ? static_cast<float>(1000.0 / avg_worst_ms) : 0.0f;
 }
 
-// Función robusta para centrar y redimensionar la ventana en el monitor activo
 void CenterWindow(GLFWwindow* window, int target_w, int target_h) {
     GLFWmonitor* primary = glfwGetPrimaryMonitor();
     if (primary) {
@@ -118,6 +133,38 @@ void CenterWindow(GLFWwindow* window, int target_w, int target_h) {
     }
     glfwSetWindowSize(window, target_w, target_h);
     glfwSetWindowPos(window, 100, 100);
+}
+
+// Función para guardar los datos recopilados en un archivo CSV
+std::string ExportBenchmarkToCSV(const std::vector<TelemetrySample>& samples) {
+    if (samples.empty()) return "";
+
+    auto now = std::chrono::system_clock::now();
+    auto in_time_t = std::chrono::system_clock::to_time_t(now);
+    std::stringstream ss;
+    ss << "benchmark_" << std::put_time(std::localtime(&in_time_t), "%Y%m%d_%H%M%S") << ".csv";
+    std::string filename = ss.str();
+
+    std::ofstream file(filename);
+    if (!file.is_open()) return "";
+
+    file << "Time_Sec,FPS,Frametime_ms,CPU_Usage_Pct,CPU_Temp_C,RAM_Used_MB,Net_DL_KBps,Disk_Read_KBps\n";
+    for (const auto& s : samples) {
+        file << std::fixed << std::setprecision(3)
+             << s.timestamp_sec << ","
+             << std::setprecision(1)
+             << s.fps << ","
+             << std::setprecision(2)
+             << s.frametime_ms << ","
+             << std::setprecision(1)
+             << s.cpu_usage << ","
+             << s.cpu_temp << ","
+             << s.ram_mb << ","
+             << s.net_kbps << ","
+             << s.disk_kbps << "\n";
+    }
+    file.close();
+    return filename;
 }
 
 int main() {
@@ -195,33 +242,79 @@ int main() {
     bool is_hud_mode = false;
     bool f12_pressed_prev = false;
 
+    // --- VARIABLES DE BENCHMARK / EXPORTACIÓN CSV ---
+    bool is_benchmarking = false;
+    bool f11_pressed_prev = false;
+    double benchmark_start_time = 0.0;
+    std::vector<TelemetrySample> benchmark_data;
+
+    // Resumen post-benchmark
+    bool show_benchmark_result = false;
+    std::string last_csv_filename = "";
+    double last_bench_duration = 0.0;
+    float last_bench_avg_fps = 0.0f;
+    float last_bench_1low_fps = 0.0f;
+
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
 
-        // Conmutación dinámica con F12
+        double now = glfwGetTime();
+
+        // 1. CONMUTACIÓN DE MODO HUD CON F12
         bool f12_pressed_now = (glfwGetKey(window, GLFW_KEY_F12) == GLFW_PRESS);
         if (f12_pressed_now && !f12_pressed_prev) {
             is_hud_mode = !is_hud_mode;
             
             if (is_hud_mode) {
-                // Modo HUD: sin marco, siempre visible
                 glfwSetWindowAttrib(window, GLFW_FLOATING, GLFW_TRUE);
                 glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_FALSE);
-                glfwPollEvents(); // Procesar eventos en el gestor de ventanas
+                glfwPollEvents();
                 glfwSetWindowSize(window, 280, 70);
                 glfwSetWindowPos(window, 25, 25);
             } else {
-                // Modo Dashboard: marco nativo, centrado
                 glfwSetWindowAttrib(window, GLFW_FLOATING, GLFW_FALSE);
                 glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_TRUE);
-                glfwPollEvents(); // Procesar eventos antes de redimensionar
+                glfwPollEvents();
                 CenterWindow(window, 1440, 900);
             }
         }
         f12_pressed_prev = f12_pressed_now;
 
-        // GUARDIA DE SEGURIDAD PARA LINUX:
-        // Si salimos del modo HUD pero la ventana sigue atascada en tamaño pequeño (< 500px), re-ejecutar CenterWindow
+        // 2. ACTIVACIÓN / DESACTIVACIÓN DEL BENCHMARK CON F11
+        bool f11_pressed_now = (glfwGetKey(window, GLFW_KEY_F11) == GLFW_PRESS);
+        if (f11_pressed_now && !f11_pressed_prev) {
+            is_benchmarking = !is_benchmarking;
+
+            if (is_benchmarking) {
+                // Iniciar grabación de benchmark
+                benchmark_data.clear();
+                benchmark_start_time = now;
+                show_benchmark_result = false;
+            } else {
+                // Detener grabación de benchmark y exportar a CSV
+                last_bench_duration = now - benchmark_start_time;
+                if (!benchmark_data.empty()) {
+                    last_csv_filename = ExportBenchmarkToCSV(benchmark_data);
+
+                    // Calcular métricas promedio del benchmark
+                    double sum_fps = 0.0;
+                    std::vector<float> bench_fts;
+                    bench_fts.reserve(benchmark_data.size());
+
+                    for (const auto& sample : benchmark_data) {
+                        sum_fps += sample.fps;
+                        bench_fts.push_back(sample.frametime_ms);
+                    }
+
+                    last_bench_avg_fps = static_cast<float>(sum_fps / benchmark_data.size());
+                    last_bench_1low_fps = CalculateLowFPS(bench_fts, 0.01f);
+                    show_benchmark_result = true;
+                }
+            }
+        }
+        f11_pressed_prev = f11_pressed_now;
+
+        // Guardia de seguridad para el redimensionado en Linux
         if (!is_hud_mode) {
             int current_w, current_h;
             glfwGetWindowSize(window, &current_w, &current_h);
@@ -230,8 +323,7 @@ int main() {
             }
         }
 
-        // Medición de Frametime y FPS
-        double now = glfwGetTime();
+        // Medición de Frametime y FPS por fotograma
         double frame_delta = now - last_frame_time;
         last_frame_time = now;
         
@@ -245,6 +337,21 @@ int main() {
             }
 
             fps_1percent_low = CalculateLowFPS(frametime_history, 0.01f);
+
+            // Muestreo dinámico si el benchmark está activo
+            if (is_benchmarking) {
+                TelemetrySample sample;
+                sample.timestamp_sec = now - benchmark_start_time;
+                sample.fps = current_fps;
+                sample.frametime_ms = current_frametime_ms;
+                sample.cpu_usage = cpu_history.empty() ? 0.0f : cpu_history.back();
+                sample.cpu_temp = current_temp;
+                sample.ram_mb = ram_history.empty() ? 0.0f : ram_history.back();
+                sample.net_kbps = net_dl_history.empty() ? 0.0f : net_dl_history.back();
+                sample.disk_kbps = disk_read_history.empty() ? 0.0f : disk_read_history.back();
+
+                benchmark_data.push_back(sample);
+            }
         }
 
         // Muestreo de Hardware cada 0.5s
@@ -285,8 +392,15 @@ int main() {
 
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 8));
             ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
-            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.05f, 0.05f, 0.08f, 0.85f));
-            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.20f, 0.80f, 1.00f, 0.40f));
+            
+            // Fondo con tinte rojo si se está grabando benchmark
+            if (is_benchmarking) {
+                ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.25f, 0.04f, 0.04f, 0.90f));
+                ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(1.00f, 0.20f, 0.20f, 0.80f));
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.05f, 0.05f, 0.08f, 0.85f));
+                ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.20f, 0.80f, 1.00f, 0.40f));
+            }
 
             ImGuiWindowFlags hud_flags = ImGuiWindowFlags_NoTitleBar | 
                                          ImGuiWindowFlags_NoResize | 
@@ -294,10 +408,16 @@ int main() {
 
             ImGui::Begin("HUD_CompactPill", nullptr, hud_flags);
             
-            // Fila 1: FPS y 1% Low
+            // Fila 1: FPS, 1% Low e Indicador REC
             ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), "%.0f FPS", current_fps);
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "(1%%: %.0f)", fps_1percent_low);
+
+            if (is_benchmarking) {
+                int elapsed_s = static_cast<int>(now - benchmark_start_time);
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.0f, 0.2f, 0.2f, 1.0f), "REC %ds", elapsed_s);
+            }
 
             // Fila 2: CPU % y Temperatura
             ImGui::TextColored(ImVec4(0.2f, 0.8f, 1.0f, 1.0f), "CPU: %.0f%%", cpu_history.back());
@@ -317,12 +437,38 @@ int main() {
 
             ImGui::Begin("MainPanel", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
 
+            // Cabecera con estado de Grabación
             ImGui::TextColored(ImVec4(0.2f, 0.8f, 1.0f, 1.0f), "GAMEPERFTRACE HARDWARE MONITOR");
-            ImGui::SameLine(ImGui::GetWindowWidth() - 480);
-            ImGui::Text("F12: Modo HUD Compacto | Uptime: %s", formatUptime(monitor.getUptimeSeconds()).c_str());
+            ImGui::SameLine(ImGui::GetWindowWidth() - 580);
+
+            if (is_benchmarking) {
+                int elapsed_s = static_cast<int>(now - benchmark_start_time);
+                ImGui::TextColored(ImVec4(1.0f, 0.2f, 0.2f, 1.0f), "[F11: PARAR REC %ds]", elapsed_s);
+            } else {
+                ImGui::Text("F11: Iniciar REC | F12: HUD");
+            }
+
+            ImGui::SameLine();
+            ImGui::Text(" | Uptime: %s", formatUptime(monitor.getUptimeSeconds()).c_str());
 
             ImGui::Separator();
             ImGui::Spacing();
+
+            // BANNER DE NOTIFICACIÓN TRAS GRAVACIÓN DE BENCHMARK
+            if (show_benchmark_result && !is_benchmarking) {
+                ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.35f, 0.15f, 0.40f));
+                ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.20f, 0.90f, 0.40f, 0.60f));
+                ImGui::BeginChild("BenchNotice", ImVec2(0, 50), true);
+                
+                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), "[OK] BENCHMARK GUARDADO:");
+                ImGui::SameLine();
+                ImGui::Text("Duracion: %.1fs | Avg FPS: %.0f | 1%% Low: %.0f | Archivo: %s", 
+                            last_bench_duration, last_bench_avg_fps, last_bench_1low_fps, last_csv_filename.c_str());
+
+                ImGui::EndChild();
+                ImGui::PopStyleColor(2);
+                ImGui::Spacing();
+            }
 
             // Tarjetas KPI
             ImGui::Columns(4, "kpis", false);

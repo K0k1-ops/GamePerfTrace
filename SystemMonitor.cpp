@@ -8,13 +8,9 @@
 #include <cstring>
 
 #ifdef _WIN32
-#ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0600
-#endif
 #include <winsock2.h>
 #include <windows.h>
 #include <iphlpapi.h>
-#include <netioapi.h>
 #include <comdef.h>
 #include <Wbemidl.h>
 #include <dxgi1_4.h>
@@ -322,7 +318,7 @@ float SystemMonitor::getCpuTemperature() {
         hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\WMI"), NULL, NULL, 0, NULL, 0, 0, &pSvc);
         if (SUCCEEDED(hr) && pSvc) {
             IEnumWbemClassObject* pEnumerator = NULL;
-            hr = pSvc->ExecQuery(bstr_t("WQL"), bstr_t("SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature"),
+            hr = pSvc->ExecQuery(_bstr_t("WQL"), _bstr_t("SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature"),
                 WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnumerator);
             if (SUCCEEDED(hr) && pEnumerator) {
                 IWbemClassObject *pclsObj = NULL;
@@ -444,30 +440,32 @@ float SystemMonitor::getRamUsageMB() {
 NetworkMetrics SystemMonitor::getNetworkIO() {
     NetworkMetrics metrics;
 #ifdef _WIN32
-    PMIB_IF_TABLE2 pTable = NULL;
-    if (GetIfTable2(&pTable) == NO_ERROR && pTable) {
-        uint64_t total_rx = 0, total_tx = 0;
-        for (ULONG i = 0; i < pTable->NumEntries; i++) {
-            MIB_IF_ROW2* row = &pTable->Table[i];
-            if (row->InterfaceAndOperStatusFlags.FilterInterface || row->Type == MIB_IF_TYPE_LOOPBACK) continue;
-            if (row->OperStatus == IfOperStatusUp) {
-                total_rx += row->InOctets;
-                total_tx += row->OutOctets;
+    MIB_IFTABLE* pTable = NULL;
+    DWORD dwSize = 0;
+    if (GetIfTable(NULL, &dwSize, FALSE) == ERROR_INSUFFICIENT_BUFFER) {
+        pTable = (MIB_IFTABLE*)malloc(dwSize);
+        if (pTable && GetIfTable(pTable, &dwSize, FALSE) == NO_ERROR) {
+            uint64_t total_rx = 0, total_tx = 0;
+            for (DWORD i = 0; i < pTable->dwNumEntries; i++) {
+                MIB_IFROW* row = &pTable->table[i];
+                if (row->dwType != MIB_IF_TYPE_LOOPBACK) {
+                    total_rx += row->dwInOctets;
+                    total_tx += row->dwOutOctets;
+                }
             }
-        }
-        FreeMibTable(pTable);
+            auto now = std::chrono::steady_clock::now();
+            double current_time = std::chrono::duration<double>(now.time_since_epoch()).count();
+            double time_diff = current_time - last_net_time;
 
-        auto now = std::chrono::steady_clock::now();
-        double current_time = std::chrono::duration<double>(now.time_since_epoch()).count();
-        double time_diff = current_time - last_net_time;
-
-        if (last_net_time > 0.0 && time_diff > 0.0) {
-            metrics.download_kbps = static_cast<float>((total_rx - last_net_rx) / 1024.0 / time_diff);
-            metrics.upload_kbps = static_cast<float>((total_tx - last_net_tx) / 1024.0 / time_diff);
+            if (last_net_time > 0.0 && time_diff > 0.0) {
+                metrics.download_kbps = static_cast<float>((total_rx - last_net_rx) / 1024.0 / time_diff);
+                metrics.upload_kbps = static_cast<float>((total_tx - last_net_tx) / 1024.0 / time_diff);
+            }
+            last_net_rx = total_rx;
+            last_net_tx = total_tx;
+            last_net_time = current_time;
         }
-        last_net_rx = total_rx;
-        last_net_tx = total_tx;
-        last_net_time = current_time;
+        if (pTable) free(pTable);
     }
 #else
     std::ifstream file("/proc/net/dev");

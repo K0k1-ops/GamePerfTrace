@@ -6,6 +6,11 @@
 #define _CRT_SECURE_NO_WARNINGS
 #endif
 
+#ifdef _WIN32
+#include <winsock2.h>
+#include <windows.h>
+#endif
+
 #ifndef GL_SHADING_LANGUAGE_VERSION
 #define GL_SHADING_LANGUAGE_VERSION 0x8B8C
 #endif
@@ -31,9 +36,7 @@
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 
-#ifdef _WIN32
-#include <windows.h>
-#else
+#ifndef _WIN32
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
 
@@ -173,7 +176,7 @@ float CalculateLowFPS(const std::vector<float>& ft_buffer, float percentile) {
     std::vector<float> sorted_ft = ft_buffer;
     std::sort(sorted_ft.rbegin(), sorted_ft.rend());
 
-    size_t count = (std::max)<size_t>(1, static_cast<size_t>(sorted_ft.size() * percentile));
+    size_t count = std::max(static_cast<size_t>(1), static_cast<size_t>(sorted_ft.size() * percentile));
     if (count > sorted_ft.size()) count = sorted_ft.size();
 
     double sum_worst_ms = std::accumulate(sorted_ft.begin(), sorted_ft.begin() + count, 0.0);
@@ -187,10 +190,10 @@ void CenterWindow(GLFWwindow* window, int target_w, int target_h) {
     if (primary) {
         const GLFWvidmode* mode = glfwGetVideoMode(primary);
         if (mode) {
-            int w = (std::min)(target_w, mode->width - 80);
-            int h = (std::min)(target_h, mode->height - 80);
-            int xpos = (std::max)(0, (mode->width - w) / 2);
-            int ypos = (std::max)(0, (mode->height - h) / 2);
+            int w = std::min(target_w, mode->width - 80);
+            int h = std::min(target_h, mode->height - 80);
+            int xpos = std::max(0, (mode->width - w) / 2);
+            int ypos = std::max(0, (mode->height - h) / 2);
 
             glfwSetWindowSize(window, w, h);
             glfwSetWindowPos(window, xpos, ypos);
@@ -645,8 +648,7 @@ int main(int argc, char** argv) {
                     ImGui::Spacing();
 
                     float available_height = ImGui::GetContentRegionAvail().y;
-                    float dynamic_plot_height = (available_height - 30.0f) / 2.0f; 
-                    dynamic_plot_height = (std::max)(150.0f, dynamic_plot_height);
+                    float dynamic_plot_height = std::max(150.0f, (available_height - 30.0f) / 2.0f);
 
                     ImGui::Columns(2, "row1", false);
                     

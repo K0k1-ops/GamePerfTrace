@@ -1,3 +1,11 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
+#ifndef _CRT_SECURE_NO_WARNINGS
+#define _CRT_SECURE_NO_WARNINGS
+#endif
+
 #ifndef GL_SHADING_LANGUAGE_VERSION
 #define GL_SHADING_LANGUAGE_VERSION 0x8B8C
 #endif
@@ -52,7 +60,6 @@ struct LinuxGlobalKeyMonitor {
 static LinuxGlobalKeyMonitor g_linux_keys;
 #endif
 
-// Funciones para consultar el estado global de F12 y F11 sin depender del foco de la ventana
 bool IsGlobalF12Pressed(GLFWwindow* window) {
 #ifdef _WIN32
     bool win_state = (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
@@ -106,7 +113,10 @@ std::string formatUptime(uint64_t seconds) {
     uint64_t mins = (seconds % 3600) / 60;
     uint64_t secs = seconds % 60;
     char buffer[64];
-    snprintf(buffer, sizeof(buffer), "%llu h %llu m %llu s", hrs, mins, secs);
+    snprintf(buffer, sizeof(buffer), "%llu h %llu m %llu s",
+             static_cast<unsigned long long>(hrs),
+             static_cast<unsigned long long>(mins),
+             static_cast<unsigned long long>(secs));
     return std::string(buffer);
 }
 
@@ -163,7 +173,7 @@ float CalculateLowFPS(const std::vector<float>& ft_buffer, float percentile) {
     std::vector<float> sorted_ft = ft_buffer;
     std::sort(sorted_ft.rbegin(), sorted_ft.rend());
 
-    size_t count = std::max<size_t>(1, static_cast<size_t>(sorted_ft.size() * percentile));
+    size_t count = (std::max)<size_t>(1, static_cast<size_t>(sorted_ft.size() * percentile));
     if (count > sorted_ft.size()) count = sorted_ft.size();
 
     double sum_worst_ms = std::accumulate(sorted_ft.begin(), sorted_ft.begin() + count, 0.0);
@@ -177,10 +187,10 @@ void CenterWindow(GLFWwindow* window, int target_w, int target_h) {
     if (primary) {
         const GLFWvidmode* mode = glfwGetVideoMode(primary);
         if (mode) {
-            int w = std::min(target_w, mode->width - 80);
-            int h = std::min(target_h, mode->height - 80);
-            int xpos = std::max(0, (mode->width - w) / 2);
-            int ypos = std::max(0, (mode->height - h) / 2);
+            int w = (std::min)(target_w, mode->width - 80);
+            int h = (std::min)(target_h, mode->height - 80);
+            int xpos = (std::max)(0, (mode->width - w) / 2);
+            int ypos = (std::max)(0, (mode->height - h) / 2);
 
             glfwSetWindowSize(window, w, h);
             glfwSetWindowPos(window, xpos, ypos);
@@ -225,7 +235,8 @@ std::string ExportBenchmarkToCSV(const std::vector<TelemetrySample>& samples) {
     return filename;
 }
 
-int main() {
+int main(int argc, char** argv) {
+    (void)argc; (void)argv;
     if (!glfwInit()) return -1;
 
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -302,18 +313,15 @@ int main() {
     bool is_hud_mode = false;
     bool f12_pressed_prev = false;
 
-    // Estado del HUD: Posición y tamaño
     int hud_win_x = 25;
     int hud_win_y = 25;
     int hud_win_w = 340;
     int hud_win_h = 135;
 
-    // Arrastre dinámico
     bool is_dragging_hud = false;
     double drag_start_offset_x = 0.0;
     double drag_start_offset_y = 0.0;
 
-    // Benchmark / Exportación CSV
     bool is_benchmarking = false;
     bool f11_pressed_prev = false;
     double benchmark_start_time = 0.0;
@@ -330,7 +338,6 @@ int main() {
 
         double now = glfwGetTime();
 
-        // 1. CONMUTACIÓN DE MODO HUD CON F12 GLOBAL
         bool f12_pressed_now = IsGlobalF12Pressed(window);
         if (f12_pressed_now && !f12_pressed_prev) {
             is_hud_mode = !is_hud_mode;
@@ -353,7 +360,6 @@ int main() {
         }
         f12_pressed_prev = f12_pressed_now;
 
-        // 2. ACTIVACIÓN / DESACTIVACIÓN BENCHMARK CON F11 GLOBAL
         bool f11_pressed_now = IsGlobalF11Pressed(window);
         if (f11_pressed_now && !f11_pressed_prev) {
             is_benchmarking = !is_benchmarking;
@@ -384,7 +390,6 @@ int main() {
         }
         f11_pressed_prev = f11_pressed_now;
 
-        // Guardia de seguridad para Linux (Dashboard)
         if (!is_hud_mode) {
             int current_w, current_h;
             glfwGetWindowSize(window, &current_w, &current_h);
@@ -393,7 +398,6 @@ int main() {
             }
         }
 
-        // Medición de Frametime y FPS
         double frame_delta = now - last_frame_time;
         last_frame_time = now;
         
@@ -426,7 +430,6 @@ int main() {
             }
         }
 
-        // Muestreo de Hardware cada 0.5s
         if (now - last_hardware_update >= 0.5) {
             float cpu = monitor.getCpuUsage();
             float ram = static_cast<float>(monitor.getRamUsageMB());
@@ -462,7 +465,6 @@ int main() {
         ImGui::NewFrame();
 
         if (is_hud_mode) {
-            // --- MODO 1: MICRO-HUD OVERLAY INTERACTIVO ---
             ImGui::SetNextWindowPos(ImVec2(0, 0));
             ImGui::SetNextWindowSizeConstraints(ImVec2(280, 120), ImVec2(700, 400));
 
@@ -481,12 +483,10 @@ int main() {
 
             ImGui::Begin("HUD_CompactPill", nullptr, hud_flags);
             
-            // Fila 0: Barra de Arrastre
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.4f, 0.5f, 1.0f));
             ImGui::TextUnformatted(":: GAMEPERFTRACE");
             ImGui::PopStyleColor();
 
-            // Lógica de movimiento con el ratón
             double cx, cy;
             glfwGetCursorPos(window, &cx, &cy);
 
@@ -510,7 +510,6 @@ int main() {
                 }
             }
 
-            // Sincronización de redimensionado GLFW / ImGui
             ImVec2 current_imgui_size = ImGui::GetWindowSize();
             int cur_glfw_w, cur_glfw_h;
             glfwGetWindowSize(window, &cur_glfw_w, &cur_glfw_h);
@@ -522,7 +521,6 @@ int main() {
                 glfwSetWindowSize(window, hud_win_w, hud_win_h);
             }
 
-            // Fila 1: FPS, 1% Low e Indicador REC
             ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), "%.0f FPS", current_fps);
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "(1%%: %.0f)", fps_1percent_low);
@@ -533,14 +531,12 @@ int main() {
                 ImGui::TextColored(ImVec4(1.0f, 0.2f, 0.2f, 1.0f), "REC %ds", elapsed_s);
             }
 
-            // Fila 2: CPU % y Temperatura
             ImGui::TextColored(ImVec4(0.2f, 0.8f, 1.0f, 1.0f), "CPU: %.0f%%", cpu_history.back());
             if (current_temp > 0.0f) {
                 ImGui::SameLine();
                 ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "| %.0f°C", current_temp);
             }
 
-            // Fila 3: GPU % y VRAM
             if (current_gpu.available) {
                 ImGui::TextColored(ImVec4(0.8f, 0.4f, 1.0f, 1.0f), "GPU: %.0f%%", current_gpu.usage_pct);
                 if (current_gpu.temp_c > 0.0f) {
@@ -560,7 +556,6 @@ int main() {
             ImGui::PopStyleVar(2);
 
         } else {
-            // --- MODO 2: DASHBOARD PRO COMPLETO ---
             ImGui::SetNextWindowPos(ImVec2(0, 0));
             ImGui::SetNextWindowSize(io.DisplaySize);
 
@@ -597,7 +592,6 @@ int main() {
                 ImGui::Spacing();
             }
 
-            // Tarjetas KPI
             ImGui::Columns(5, "kpis", false);
 
             char cpu_val[32];
@@ -652,7 +646,7 @@ int main() {
 
                     float available_height = ImGui::GetContentRegionAvail().y;
                     float dynamic_plot_height = (available_height - 30.0f) / 2.0f; 
-                    dynamic_plot_height = std::max(150.0f, dynamic_plot_height);
+                    dynamic_plot_height = (std::max)(150.0f, dynamic_plot_height);
 
                     ImGui::Columns(2, "row1", false);
                     
@@ -684,7 +678,7 @@ int main() {
                     ImGui::NextColumn();
 
                     char ram_lbl[64];
-                    snprintf(ram_lbl, sizeof(ram_lbl), "RAM Used: %.0f / %lu MB", ram_history.back(), specs.total_ram_mb);
+                    snprintf(ram_lbl, sizeof(ram_lbl), "RAM Used: %.0f / %llu MB", ram_history.back(), static_cast<unsigned long long>(specs.total_ram_mb));
                     ImGui::PushStyleColor(ImGuiCol_PlotLines, ImVec4(0.7f, 0.3f, 1.0f, 1.0f));
                     ImGui::PlotLines("##RAM", ram_history.data(), MAX_HARDWARE_SAMPLES, 0, ram_lbl, 0.0f, static_cast<float>(specs.total_ram_mb), ImVec2(-1, dynamic_plot_height));
                     ImGui::PopStyleColor();
@@ -714,10 +708,10 @@ int main() {
 
                     if (ImGui::CollapsingHeader(" Memoria RAM & Paginacion", ImGuiTreeNodeFlags_DefaultOpen)) {
                         ImGui::TextColored(ImVec4(0.8f, 0.4f, 1.0f, 1.0f), "RAM Fisica Total: "); ImGui::SameLine(); 
-                        ImGui::Text("%lu MB (%.2f GB)", specs.total_ram_mb, static_cast<double>(specs.total_ram_mb) / 1024.0);
+                        ImGui::Text("%llu MB (%.2f GB)", static_cast<unsigned long long>(specs.total_ram_mb), static_cast<double>(specs.total_ram_mb) / 1024.0);
                         
                         ImGui::TextColored(ImVec4(0.8f, 0.4f, 1.0f, 1.0f), "Memoria Swap: "); ImGui::SameLine(); 
-                        ImGui::Text("%lu MB (%.2f GB)", specs.total_swap_mb, static_cast<double>(specs.total_swap_mb) / 1024.0);
+                        ImGui::Text("%llu MB (%.2f GB)", static_cast<unsigned long long>(specs.total_swap_mb), static_cast<double>(specs.total_swap_mb) / 1024.0);
                     }
 
                     if (ImGui::CollapsingHeader(" Unidades de Almacenamiento", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -726,7 +720,10 @@ int main() {
                             float used_percent = drive.total_gb > 0 ? (static_cast<float>(used_gb) / drive.total_gb) * 100.0f : 0.0f;
                             
                             ImGui::Text("Montaje: %s", drive.mount_point.c_str());
-                            ImGui::Text("Capacidad: %lu GB Total | %lu GB Libre (%lu GB Usado)", drive.total_gb, drive.free_gb, used_gb);
+                            ImGui::Text("Capacidad: %llu GB Total | %llu GB Libre (%llu GB Usado)", 
+                                        static_cast<unsigned long long>(drive.total_gb), 
+                                        static_cast<unsigned long long>(drive.free_gb), 
+                                        static_cast<unsigned long long>(used_gb));
                             
                             char progress_lbl[32];
                             snprintf(progress_lbl, sizeof(progress_lbl), "%.1f%% ocupado", used_percent);

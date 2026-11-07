@@ -598,8 +598,11 @@ int main(int argc, char** argv) {
             ImGui::Columns(5, "kpis", false);
 
             char cpu_val[32];
-            if (current_temp > 0.0f) snprintf(cpu_val, sizeof(cpu_val), "%.1f%% (%.0f°C)", cpu_history.back(), current_temp);
-            else snprintf(cpu_val, sizeof(cpu_val), "%.1f%%", cpu_history.back());
+            if (current_temp > 0.0f) {
+                snprintf(cpu_val, sizeof(cpu_val), "%.1f%% (%.0f°C)", cpu_history.back(), current_temp);
+            } else {
+                snprintf(cpu_val, sizeof(cpu_val), "%.1f%%", cpu_history.back());
+            }
             RenderKpiCard("PROCESADOR (CPU)", cpu_val, cpu_history.back() > 85.0f ? "Pico de Carga" : "Carga Normal", ImVec4(0.2f, 0.7f, 1.0f, 1.0f));
 
             ImGui::NextColumn();

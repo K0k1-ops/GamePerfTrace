@@ -313,24 +313,24 @@ float SystemMonitor::getCpuTemperature() {
     IWbemLocator *pLoc = NULL;
     HRESULT hr = CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, reinterpret_cast<LPVOID*>(&pLoc));
     if (SUCCEEDED(hr) && pLoc) {
-        // Método 1: Query ROOT\WMI (MSAcpi_ThermalZoneTemperature)
+        
+        // --- FALLBACK 1: LibreHardwareMonitor WMI ---
         IWbemServices *pSvc = NULL;
-        hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\WMI"), NULL, NULL, 0, NULL, 0, 0, &pSvc);
+        hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\LibreHardwareMonitor"), NULL, NULL, 0, NULL, 0, 0, &pSvc);
         if (SUCCEEDED(hr) && pSvc) {
             CoSetProxyBlanket(pSvc, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, NULL,
                               RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, NULL, EOAC_NONE);
 
             IEnumWbemClassObject* pEnumerator = NULL;
-            hr = pSvc->ExecQuery(_bstr_t("WQL"), _bstr_t("SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature"),
+            hr = pSvc->ExecQuery(_bstr_t("WQL"), _bstr_t("SELECT Value FROM Sensor WHERE SensorType='Temperature' AND (Name LIKE '%CPU Package%' OR Name LIKE '%CPU Core%')"),
                 WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnumerator);
             if (SUCCEEDED(hr) && pEnumerator) {
                 IWbemClassObject *pclsObj = NULL;
                 ULONG uReturn = 0;
                 if (pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK && uReturn > 0) {
                     VARIANT vtProp;
-                    if (SUCCEEDED(pclsObj->Get(L"CurrentTemperature", 0, &vtProp, 0, 0))) {
-                        float decikelvin = static_cast<float>(vtProp.ulVal);
-                        temp = (decikelvin - 2732.0f) / 10.0f;
+                    if (SUCCEEDED(pclsObj->Get(L"Value", 0, &vtProp, 0, 0)) && vtProp.vt == VT_R4) {
+                        temp = vtProp.fltVal;
                         VariantClear(&vtProp);
                     }
                     pclsObj->Release();
@@ -340,29 +340,53 @@ float SystemMonitor::getCpuTemperature() {
             pSvc->Release();
         }
 
-        // Método 2: Fallback a ROOT\CIMV2 (Win32_PerfFormattedData_Counters_ThermalZoneInformation)
+        // --- FALLBACK 2: OpenHardwareMonitor WMI ---
         if (temp <= 0.0f) {
             pSvc = NULL;
-            hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\CIMV2"), NULL, NULL, 0, NULL, 0, 0, &pSvc);
+            hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\OpenHardwareMonitor"), NULL, NULL, 0, NULL, 0, 0, &pSvc);
             if (SUCCEEDED(hr) && pSvc) {
                 CoSetProxyBlanket(pSvc, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, NULL,
                                   RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, NULL, EOAC_NONE);
 
                 IEnumWbemClassObject* pEnumerator = NULL;
-                hr = pSvc->ExecQuery(_bstr_t("WQL"), _bstr_t("SELECT HighPrecisionTemperature, Temperature FROM Win32_PerfFormattedData_Counters_ThermalZoneInformation"),
+                hr = pSvc->ExecQuery(_bstr_t("WQL"), _bstr_t("SELECT Value FROM Sensor WHERE SensorType='Temperature' AND (Name LIKE '%CPU Package%' OR Name LIKE '%CPU Core%')"),
                     WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnumerator);
                 if (SUCCEEDED(hr) && pEnumerator) {
                     IWbemClassObject *pclsObj = NULL;
                     ULONG uReturn = 0;
                     if (pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK && uReturn > 0) {
                         VARIANT vtProp;
-                        if (SUCCEEDED(pclsObj->Get(L"HighPrecisionTemperature", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL && vtProp.ulVal > 0) {
-                            float kelvin100 = static_cast<float>(vtProp.ulVal);
-                            temp = (kelvin100 / 100.0f) - 273.15f;
+                        if (SUCCEEDED(pclsObj->Get(L"Value", 0, &vtProp, 0, 0)) && vtProp.vt == VT_R4) {
+                            temp = vtProp.fltVal;
                             VariantClear(&vtProp);
-                        } else if (SUCCEEDED(pclsObj->Get(L"Temperature", 0, &vtProp, 0, 0)) && vtProp.vt != VT_NULL && vtProp.ulVal > 0) {
-                            float kelvin = static_cast<float>(vtProp.ulVal);
-                            temp = kelvin - 273.15f;
+                        }
+                        pclsObj->Release();
+                    }
+                    pEnumerator->Release();
+                }
+                pSvc->Release();
+            }
+        }
+
+        // --- FALLBACK 3: WMI ACPI Nativo (Portátiles / Placas compatibles) ---
+        if (temp <= 0.0f) {
+            pSvc = NULL;
+            hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\WMI"), NULL, NULL, 0, NULL, 0, 0, &pSvc);
+            if (SUCCEEDED(hr) && pSvc) {
+                CoSetProxyBlanket(pSvc, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, NULL,
+                                  RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, NULL, EOAC_NONE);
+
+                IEnumWbemClassObject* pEnumerator = NULL;
+                hr = pSvc->ExecQuery(_bstr_t("WQL"), _bstr_t("SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature"),
+                    WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnumerator);
+                if (SUCCEEDED(hr) && pEnumerator) {
+                    IWbemClassObject *pclsObj = NULL;
+                    ULONG uReturn = 0;
+                    if (pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK && uReturn > 0) {
+                        VARIANT vtProp;
+                        if (SUCCEEDED(pclsObj->Get(L"CurrentTemperature", 0, &vtProp, 0, 0))) {
+                            float decikelvin = static_cast<float>(vtProp.ulVal);
+                            temp = (decikelvin - 2732.0f) / 10.0f;
                             VariantClear(&vtProp);
                         }
                         pclsObj->Release();

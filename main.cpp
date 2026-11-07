@@ -10,6 +10,7 @@
 #include <vector>
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include "SystemMonitor.hpp"
 
 #include <GLFW/glfw3.h>
@@ -17,7 +18,6 @@
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 
-// Convierte KB/s a MB/s si supera los 1024 KB/s para mejor lectura
 std::string formatRate(float kbps) {
     char buffer[32];
     if (kbps >= 1024.0f) {
@@ -37,7 +37,10 @@ std::string formatUptime(uint64_t seconds) {
     return std::string(buffer);
 }
 
-// Función auxiliar para renderizar Tarjetas KPI en la cabecera
+void framebuffer_size_callback(GLFWwindow* window, int width, int height) {
+    glViewport(0, 0, width, height);
+}
+
 void RenderKpiCard(const char* title, const char* value, const char* status, ImVec4 color) {
     ImGui::PushStyleColor(ImGuiCol_Border, color);
     ImGui::BeginChild(title, ImVec2(0, 115), true, ImGuiWindowFlags_NoScrollbar);
@@ -52,8 +55,43 @@ void RenderKpiCard(const char* title, const char* value, const char* status, ImV
     ImGui::PopStyleColor();
 }
 
+// Carga una fuente vectorial nativa del sistema para evitar desenfoque bitmap
+void LoadCrispSystemFont(ImGuiIO& io, float font_size) {
+    ImFontConfig font_config;
+    font_config.OversampleH = 4;
+    font_config.OversampleV = 4;
+    font_config.PixelSnapH = true;
+
+    // Rutas estándar de fuentes vectoriales en Linux y Windows
+    const std::vector<std::string> font_paths = {
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "C:\\Windows\\Fonts\\segoeui.ttf"
+    };
+
+    bool font_loaded = false;
+    for (const auto& path : font_paths) {
+        std::ifstream file(path);
+        if (file.good()) {
+            io.Fonts->AddFontFromFileTTF(path.c_str(), font_size, &font_config);
+            font_loaded = true;
+            break;
+        }
+    }
+
+    if (!font_loaded) {
+        io.Fonts->AddFontDefault(&font_config);
+    }
+}
+
 int main() {
     if (!glfwInit()) return -1;
+
+    // Configuración de pistas de contexto OpenGL para nitidez de pintado
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
 
     GLFWwindow* window = glfwCreateWindow(1440, 900, "GamePerfTrace - Dashboard Pro", NULL, NULL);
     if (!window) {
@@ -63,17 +101,32 @@ int main() {
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
 
+    glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
+
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO(); (void)io;
 
-    io.FontGlobalScale = 2.0f;
+    // 1. Obtener la escala real del monitor (DPI Scale en Linux/Windows)
+    int win_w, win_h, fb_w, fb_h;
+    glfwGetWindowSize(window, &win_w, &win_h);
+    glfwGetFramebufferSize(window, &fb_w, &fb_h);
+    float dpi_scale = (win_w > 0) ? (static_cast<float>(fb_w) / static_cast<float>(win_w)) : 1.0f;
+
+    // 2. Cargar fuente rasterizada directamente al tamaño de píxel nativo (22px * DPI)
+    float target_font_size = 22.0f * (dpi_scale > 1.0f ? dpi_scale : 1.0f);
+    LoadCrispSystemFont(io, target_font_size);
+
+    // ELIMINADO: io.FontGlobalScale = 2.0f; <-- Esta era la causa de la borrosidad
 
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
+    
+    // 3. Escalar los elementos de la UI de forma vectorial limpia
+    style.ScaleAllSizes(dpi_scale > 1.0f ? dpi_scale : 1.2f);
     style.WindowRounding = 0.0f;
-    style.FrameRounding = 8.0f;
-    style.ItemSpacing = ImVec2(14, 14);
+    style.FrameRounding = 6.0f;
+    style.ItemSpacing = ImVec2(12, 12);
     style.FramePadding = ImVec2(10, 8);
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
@@ -97,6 +150,11 @@ int main() {
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
+
+        // 4. Sincronizar dimensiones reales de pintado por frame
+        int display_w, display_h;
+        glfwGetFramebufferSize(window, &display_w, &display_h);
+        glViewport(0, 0, display_w, display_h);
 
         double current_time = glfwGetTime();
         if (current_time - last_time >= 0.5) {
@@ -140,7 +198,6 @@ int main() {
         // 1. TARJETAS DE RESUMEN RÁPIDO (KPI CARDS)
         ImGui::Columns(4, "kpis", false);
 
-        // Tarjeta CPU
         char cpu_val[32];
         float temp = monitor.getCpuTemperature();
         if (temp > 0.0f) snprintf(cpu_val, sizeof(cpu_val), "%.1f%% (%.0f°C)", cpu_history.back(), temp);
@@ -150,7 +207,6 @@ int main() {
 
         ImGui::NextColumn();
 
-        // Tarjeta RAM
         char ram_val[32];
         snprintf(ram_val, sizeof(ram_val), "%.0f MB", ram_history.back());
         float ram_pct = specs.total_ram_mb > 0 ? (ram_history.back() / specs.total_ram_mb) * 100.0f : 0.0f;
@@ -160,14 +216,12 @@ int main() {
 
         ImGui::NextColumn();
 
-        // Tarjeta RED
         std::string net_val = formatRate(net_dl_history.back());
         const char* net_st = net_dl_history.back() > 2000.0f ? "Descarga Intensa" : "Red Estable";
         RenderKpiCard("RED (DESCARGA)", net_val.c_str(), net_st, ImVec4(0.2f, 0.9f, 0.5f, 1.0f));
 
         ImGui::NextColumn();
 
-        // Tarjeta DISCO
         std::string disk_val = formatRate(disk_read_history.back());
         const char* disk_st = disk_read_history.back() > 10000.0f ? "Cargando Archivos" : "Disco Reposado";
         RenderKpiCard("DISCO (LECTURA)", disk_val.c_str(), disk_st, ImVec4(1.0f, 0.6f, 0.2f, 1.0f));
@@ -179,7 +233,6 @@ int main() {
         // 2. PESTAÑAS DETALLADAS
         if (ImGui::BeginTabBar("Tabs")) {
             
-            // PESTAÑA 1: TELEMETRÍA CON GRÁFICAS EN COLOR Y AUTO-ESCALA
             if (ImGui::BeginTabItem(" Telemetria en Vivo ")) {
                 ImGui::Spacing();
 
@@ -187,7 +240,6 @@ int main() {
                 float dynamic_plot_height = (available_height - 30.0f) / 2.0f; 
                 dynamic_plot_height = std::max(150.0f, dynamic_plot_height);
 
-                // Fila 1: CPU (Azul) y RAM (Púrpura)
                 ImGui::Columns(2, "row1", false);
                 
                 char cpu_lbl[64];
@@ -207,10 +259,8 @@ int main() {
                 ImGui::Columns(1);
                 ImGui::Spacing();
 
-                // Fila 2: RED (Verde) y DISCO (Naranja) con Auto-Escalado
                 ImGui::Columns(2, "row2", false);
 
-                // Auto-Escalado de Red
                 float max_net = *std::max_element(net_dl_history.begin(), net_dl_history.end());
                 float net_scale = std::max(500.0f, max_net * 1.2f);
                 std::string net_lbl = "Red Descarga: " + formatRate(net_dl_history.back());
@@ -221,7 +271,6 @@ int main() {
 
                 ImGui::NextColumn();
 
-                // Auto-Escalado de Disco
                 float max_disk = *std::max_element(disk_read_history.begin(), disk_read_history.end());
                 float disk_scale = std::max(2000.0f, max_disk * 1.2f);
                 std::string disk_lbl = "Disco Lectura: " + formatRate(disk_read_history.back());
@@ -234,7 +283,6 @@ int main() {
                 ImGui::EndTabItem();
             }
 
-            // PESTAÑA 2: ESPECIFICACIONES COMPLETAS
             if (ImGui::BeginTabItem(" Especificaciones del Sistema ")) {
                 ImGui::Spacing();
 
@@ -291,9 +339,7 @@ int main() {
         ImGui::End();
 
         ImGui::Render();
-        int display_w, display_h;
-        glfwGetFramebufferSize(window, &display_w, &display_h);
-        glViewport(0, 0, display_w, display_h);
+        
         glClearColor(0.08f, 0.08f, 0.10f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());

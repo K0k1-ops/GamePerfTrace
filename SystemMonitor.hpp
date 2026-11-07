@@ -82,4 +82,5 @@ private:
     void initNvml();
     GpuMetrics getNvidiaGpuMetrics();
     GpuMetrics getAmdIntelGpuMetrics();
+    GpuMetrics getWindowsDxgiGpuMetrics();
 };

@@ -9,16 +9,39 @@
 
 #ifdef _WIN32
 #include <windows.h>
-#include <winternl.h>
+#include <iphlpapi.h>
 #include <comdef.h>
 #include <Wbemidl.h>
+#include <dxgi1_4.h>
+#pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "wbemuuid.lib")
+#pragma comment(lib, "dxgi.lib")
+
+static void* LoadNativeLib(const char* name) {
+    return static_cast<void*>(LoadLibraryA(name));
+}
+static void* GetNativeSym(void* handle, const char* sym) {
+    return reinterpret_cast<void*>(GetProcAddress(static_cast<HMODULE>(handle), sym));
+}
+static void FreeNativeLib(void* handle) {
+    if (handle) FreeLibrary(static_cast<HMODULE>(handle));
+}
 #else
 #include <unistd.h>
 #include <sys/sysinfo.h>
 #include <sys/statvfs.h>
 #include <sys/utsname.h>
 #include <dlfcn.h>
+
+static void* LoadNativeLib(const char* name) {
+    return dlopen(name, RTLD_LAZY);
+}
+static void* GetNativeSym(void* handle, const char* sym) {
+    return dlsym(handle, sym);
+}
+static void FreeNativeLib(void* handle) {
+    if (handle) dlclose(handle);
+}
 #endif
 
 namespace fs = std::filesystem;
@@ -50,45 +73,47 @@ SystemMonitor::SystemMonitor() {
 }
 
 SystemMonitor::~SystemMonitor() {
-#ifndef _WIN32
     if (nvml_handle && nvml_initialized) {
-        auto pnvmlShutdown = (pfn_nvmlShutdown)dlsym(nvml_handle, "nvmlShutdown");
+        auto pnvmlShutdown = reinterpret_cast<pfn_nvmlShutdown>(GetNativeSym(nvml_handle, "nvmlShutdown"));
         if (pnvmlShutdown) pnvmlShutdown();
-        dlclose(nvml_handle);
+        FreeNativeLib(nvml_handle);
     }
-#endif
 }
 
 void SystemMonitor::initNvml() {
-#ifndef _WIN32
-    nvml_handle = dlopen("libnvidia-ml.so.1", RTLD_LAZY);
+#ifdef _WIN32
+    nvml_handle = LoadNativeLib("nvml.dll");
     if (!nvml_handle) {
-        nvml_handle = dlopen("libnvidia-ml.so", RTLD_LAZY);
+        nvml_handle = LoadNativeLib("C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvml.dll");
     }
+#else
+    nvml_handle = LoadNativeLib("libnvidia-ml.so.1");
+    if (!nvml_handle) {
+        nvml_handle = LoadNativeLib("libnvidia-ml.so");
+    }
+#endif
 
     if (nvml_handle) {
-        auto pnvmlInit = (pfn_nvmlInit)dlsym(nvml_handle, "nvmlInit_v2");
-        if (!pnvmlInit) pnvmlInit = (pfn_nvmlInit)dlsym(nvml_handle, "nvmlInit");
+        auto pnvmlInit = reinterpret_cast<pfn_nvmlInit>(GetNativeSym(nvml_handle, "nvmlInit_v2"));
+        if (!pnvmlInit) pnvmlInit = reinterpret_cast<pfn_nvmlInit>(GetNativeSym(nvml_handle, "nvmlInit"));
 
         if (pnvmlInit && pnvmlInit() == 0) {
             nvml_initialized = true;
         }
     }
-#endif
 }
 
 GpuMetrics SystemMonitor::getNvidiaGpuMetrics() {
     GpuMetrics gpu;
-#ifndef _WIN32
     if (!nvml_initialized || !nvml_handle) return gpu;
 
-    auto pGetHandle = (pfn_nvmlDeviceGetHandleByIndex)dlsym(nvml_handle, "nvmlDeviceGetHandleByIndex_v2");
-    if (!pGetHandle) pGetHandle = (pfn_nvmlDeviceGetHandleByIndex)dlsym(nvml_handle, "nvmlDeviceGetHandleByIndex");
+    auto pGetHandle = reinterpret_cast<pfn_nvmlDeviceGetHandleByIndex>(GetNativeSym(nvml_handle, "nvmlDeviceGetHandleByIndex_v2"));
+    if (!pGetHandle) pGetHandle = reinterpret_cast<pfn_nvmlDeviceGetHandleByIndex>(GetNativeSym(nvml_handle, "nvmlDeviceGetHandleByIndex"));
 
-    auto pGetUtil = (pfn_nvmlDeviceGetUtilizationRates)dlsym(nvml_handle, "nvmlDeviceGetUtilizationRates");
-    auto pGetMem = (pfn_nvmlDeviceGetMemoryInfo)dlsym(nvml_handle, "nvmlDeviceGetMemoryInfo");
-    auto pGetTemp = (pfn_nvmlDeviceGetTemperature)dlsym(nvml_handle, "nvmlDeviceGetTemperature");
-    auto pGetName = (pfn_nvmlDeviceGetName)dlsym(nvml_handle, "nvmlDeviceGetName");
+    auto pGetUtil = reinterpret_cast<pfn_nvmlDeviceGetUtilizationRates>(GetNativeSym(nvml_handle, "nvmlDeviceGetUtilizationRates"));
+    auto pGetMem = reinterpret_cast<pfn_nvmlDeviceGetMemoryInfo>(GetNativeSym(nvml_handle, "nvmlDeviceGetMemoryInfo"));
+    auto pGetTemp = reinterpret_cast<pfn_nvmlDeviceGetTemperature>(GetNativeSym(nvml_handle, "nvmlDeviceGetTemperature"));
+    auto pGetName = reinterpret_cast<pfn_nvmlDeviceGetName>(GetNativeSym(nvml_handle, "nvmlDeviceGetName"));
 
     if (!pGetHandle || !pGetUtil || !pGetMem) return gpu;
 
@@ -121,6 +146,55 @@ GpuMetrics SystemMonitor::getNvidiaGpuMetrics() {
             }
         }
     }
+    return gpu;
+}
+
+GpuMetrics SystemMonitor::getWindowsDxgiGpuMetrics() {
+    GpuMetrics gpu;
+#ifdef _WIN32
+    typedef HRESULT (WINAPI *pfn_CreateDXGIFactory1)(REFIID, void**);
+    
+    HMODULE hDxgi = LoadLibraryA("dxgi.dll");
+    if (!hDxgi) return gpu;
+
+    auto pCreateFactory = reinterpret_cast<pfn_CreateDXGIFactory1>(GetProcAddress(hDxgi, "CreateDXGIFactory1"));
+    if (!pCreateFactory) {
+        FreeLibrary(hDxgi);
+        return gpu;
+    }
+
+    static const GUID IID_IDXGIFactory4_local = { 0x1bc6ea98, 0x9fb0, 0x47c6, { 0x9c, 0x51, 0x64, 0x64, 0x07, 0x00, 0x08, 0x90 } };
+    static const GUID IID_IDXGIAdapter3_local = { 0x645967a4, 0xaa28, 0x4d6e, { 0x80, 0x6e, 0x10, 0x24, 0x5b, 0x08, 0x9c, 0x5f } };
+
+    IDXGIFactory4* pFactory = nullptr;
+    if (SUCCEEDED(pCreateFactory(IID_IDXGIFactory4_local, reinterpret_cast<void**>(&pFactory))) && pFactory) {
+        IDXGIAdapter1* pAdapter = nullptr;
+        if (SUCCEEDED(pFactory->EnumAdapters1(0, &pAdapter)) && pAdapter) {
+            DXGI_ADAPTER_DESC1 desc;
+            if (SUCCEEDED(pAdapter->GetDesc1(&desc))) {
+                char nameBuf[128];
+                WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, nameBuf, sizeof(nameBuf), NULL, NULL);
+                gpu.name = nameBuf;
+                gpu.vram_total_mb = static_cast<float>(desc.DedicatedVideoMemory / (1024 * 1024));
+
+                IDXGIAdapter3* pAdapter3 = nullptr;
+                if (SUCCEEDED(pAdapter->QueryInterface(IID_IDXGIAdapter3_local, reinterpret_cast<void**>(&pAdapter3))) && pAdapter3) {
+                    DXGI_QUERY_VIDEO_MEMORY_INFO memInfo;
+                    if (SUCCEEDED(pAdapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &memInfo))) {
+                        gpu.vram_used_mb = static_cast<float>(memInfo.CurrentUsage / (1024 * 1024));
+                        if (gpu.vram_total_mb == 0.0f) {
+                            gpu.vram_total_mb = static_cast<float>(memInfo.Budget / (1024 * 1024));
+                        }
+                    }
+                    pAdapter3->Release();
+                }
+                gpu.available = true;
+            }
+            pAdapter->Release();
+        }
+        pFactory->Release();
+    }
+    FreeLibrary(hDxgi);
 #endif
     return gpu;
 }
@@ -139,7 +213,6 @@ GpuMetrics SystemMonitor::getAmdIntelGpuMetrics() {
             fv >> vendor_id;
         }
 
-        // 1. Detección AMD (amdgpu sysfs)
         std::string busy_file = base_path + "gpu_busy_percent";
         if (fs::exists(busy_file)) {
             std::ifstream fbusy(busy_file);
@@ -177,7 +250,6 @@ GpuMetrics SystemMonitor::getAmdIntelGpuMetrics() {
             break;
         }
 
-        // 2. Detección Intel iGPU / Arc (controladores i915 y xe)
         std::string gt_act_freq = "/sys/class/drm/card" + std::to_string(i) + "/gt/gt0/gt_act_freq_mhz";
         std::string rps_act_freq = "/sys/class/drm/card" + std::to_string(i) + "/gt/gt0/rps_act_freq_mhz";
         std::string rps_max_freq = "/sys/class/drm/card" + std::to_string(i) + "/gt/gt0/rps_max_freq_mhz";
@@ -225,20 +297,25 @@ GpuMetrics SystemMonitor::getGpuMetrics() {
         GpuMetrics nVidiaGpu = getNvidiaGpuMetrics();
         if (nVidiaGpu.available) return nVidiaGpu;
     }
+#ifdef _WIN32
+    return getWindowsDxgiGpuMetrics();
+#else
     return getAmdIntelGpuMetrics();
+#endif
 }
 
 float SystemMonitor::getCpuTemperature() {
 #ifdef _WIN32
-    // Lectura de WMI para Windows (MSAcpi_ThermalZoneTemperature)
     float temp = 0.0f;
-    HRESULT hres = CoInitializeEx(0, COINIT_MULTITHREADED);
+    HRESULT hres = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    bool co_initialized = SUCCEEDED(hres) || hres == S_FALSE;
+
     IWbemLocator *pLoc = NULL;
-    HRESULT hr = CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (LPVOID *)&pLoc);
-    if (SUCCEEDED(hr)) {
+    HRESULT hr = CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, reinterpret_cast<LPVOID*>(&pLoc));
+    if (SUCCEEDED(hr) && pLoc) {
         IWbemServices *pSvc = NULL;
         hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\WMI"), NULL, NULL, 0, NULL, 0, 0, &pSvc);
-        if (SUCCEEDED(hr)) {
+        if (SUCCEEDED(hr) && pSvc) {
             IEnumWbemClassObject* pEnumerator = NULL;
             hr = pSvc->ExecQuery(bstr_t("WQL"), bstr_t("SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature"),
                 WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnumerator);
@@ -260,8 +337,10 @@ float SystemMonitor::getCpuTemperature() {
         }
         pLoc->Release();
     }
-    CoUninitialize();
-    return temp > 0.0f ? temp : 0.0f;
+    if (co_initialized) {
+        CoUninitialize();
+    }
+    return (temp > 0.0f && temp < 125.0f) ? temp : 0.0f;
 #else
     std::string thermal_dir = "/sys/class/thermal/";
     if (!fs::exists(thermal_dir)) return 0.0f;
@@ -359,7 +438,33 @@ float SystemMonitor::getRamUsageMB() {
 
 NetworkMetrics SystemMonitor::getNetworkIO() {
     NetworkMetrics metrics;
-#ifndef _WIN32
+#ifdef _WIN32
+    PMIB_IF_TABLE2 pTable = NULL;
+    if (GetIfTable2(&pTable) == NO_ERROR && pTable) {
+        uint64_t total_rx = 0, total_tx = 0;
+        for (ULONG i = 0; i < pTable->NumEntries; i++) {
+            MIB_IF_ROW2* row = &pTable->Table[i];
+            if (row->InterfaceAndOperStatusFlags.FilterInterface || row->Type == MIB_IF_TYPE_LOOPBACK) continue;
+            if (row->OperStatus == IfOperStatusUp) {
+                total_rx += row->InOctets;
+                total_tx += row->OutOctets;
+            }
+        }
+        FreeMibTable(pTable);
+
+        auto now = std::chrono::steady_clock::now();
+        double current_time = std::chrono::duration<double>(now.time_since_epoch()).count();
+        double time_diff = current_time - last_net_time;
+
+        if (last_net_time > 0.0 && time_diff > 0.0) {
+            metrics.download_kbps = static_cast<float>((total_rx - last_net_rx) / 1024.0 / time_diff);
+            metrics.upload_kbps = static_cast<float>((total_tx - last_net_tx) / 1024.0 / time_diff);
+        }
+        last_net_rx = total_rx;
+        last_net_tx = total_tx;
+        last_net_time = current_time;
+    }
+#else
     std::ifstream file("/proc/net/dev");
     if (!file.is_open()) return metrics;
 
@@ -445,7 +550,21 @@ DiskMetrics SystemMonitor::getDiskIO() {
 
 SystemInfo SystemMonitor::getStaticSystemInfo() {
     SystemInfo info;
-#ifndef _WIN32
+#ifdef _WIN32
+    info.os_name = "Windows";
+    info.architecture = "x86_64";
+    
+    MEMORYSTATUSEX memInfo;
+    memInfo.dwLength = sizeof(MEMORYSTATUSEX);
+    if (GlobalMemoryStatusEx(&memInfo)) {
+        info.total_ram_mb = memInfo.ullTotalPhys / (1024 * 1024);
+    }
+
+    SYSTEM_INFO sysInfo;
+    GetSystemInfo(&sysInfo);
+    info.cpu_cores = sysInfo.dwNumberOfProcessors;
+    info.cpu_model = "Intel/AMD Processor";
+#else
     std::ifstream cpu_file("/proc/cpuinfo");
     std::string line;
     uint32_t cores = 0;
@@ -514,9 +633,6 @@ SystemInfo SystemMonitor::getStaticSystemInfo() {
             }
         }
     }
-#else
-    info.os_name = "Windows";
-    info.cpu_model = "Windows PC CPU";
 #endif
     return info;
 }

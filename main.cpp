@@ -23,7 +23,6 @@
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 
-// Estructura de muestra para el exportador de telemetría a CSV
 struct TelemetrySample {
     double timestamp_sec;
     float fps;
@@ -135,7 +134,6 @@ void CenterWindow(GLFWwindow* window, int target_w, int target_h) {
     glfwSetWindowPos(window, 100, 100);
 }
 
-// Función para guardar los datos recopilados en un archivo CSV
 std::string ExportBenchmarkToCSV(const std::vector<TelemetrySample>& samples) {
     if (samples.empty()) return "";
 
@@ -242,13 +240,23 @@ int main() {
     bool is_hud_mode = false;
     bool f12_pressed_prev = false;
 
-    // --- VARIABLES DE BENCHMARK / EXPORTACIÓN CSV ---
+    // Estado del HUD: Dimensiones iniciales ampliadas (330x110) para alojar las 3 líneas holgadamente
+    int hud_win_x = 25;
+    int hud_win_y = 25;
+    int hud_win_w = 330;
+    int hud_win_h = 110;
+
+    // Arrastre dinámico por pantalla
+    bool is_dragging_hud = false;
+    double drag_start_offset_x = 0.0;
+    double drag_start_offset_y = 0.0;
+
+    // Benchmark / Exportación CSV
     bool is_benchmarking = false;
     bool f11_pressed_prev = false;
     double benchmark_start_time = 0.0;
     std::vector<TelemetrySample> benchmark_data;
 
-    // Resumen post-benchmark
     bool show_benchmark_result = false;
     std::string last_csv_filename = "";
     double last_bench_duration = 0.0;
@@ -269,9 +277,12 @@ int main() {
                 glfwSetWindowAttrib(window, GLFW_FLOATING, GLFW_TRUE);
                 glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_FALSE);
                 glfwPollEvents();
-                glfwSetWindowSize(window, 280, 70);
-                glfwSetWindowPos(window, 25, 25);
+                glfwSetWindowSize(window, hud_win_w, hud_win_h);
+                glfwSetWindowPos(window, hud_win_x, hud_win_y);
             } else {
+                glfwGetWindowPos(window, &hud_win_x, &hud_win_y);
+                glfwGetWindowSize(window, &hud_win_w, &hud_win_h);
+
                 glfwSetWindowAttrib(window, GLFW_FLOATING, GLFW_FALSE);
                 glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_TRUE);
                 glfwPollEvents();
@@ -280,23 +291,20 @@ int main() {
         }
         f12_pressed_prev = f12_pressed_now;
 
-        // 2. ACTIVACIÓN / DESACTIVACIÓN DEL BENCHMARK CON F11
+        // 2. ACTIVACIÓN / DESACTIVACIÓN BENCHMARK CON F11
         bool f11_pressed_now = (glfwGetKey(window, GLFW_KEY_F11) == GLFW_PRESS);
         if (f11_pressed_now && !f11_pressed_prev) {
             is_benchmarking = !is_benchmarking;
 
             if (is_benchmarking) {
-                // Iniciar grabación de benchmark
                 benchmark_data.clear();
                 benchmark_start_time = now;
                 show_benchmark_result = false;
             } else {
-                // Detener grabación de benchmark y exportar a CSV
                 last_bench_duration = now - benchmark_start_time;
                 if (!benchmark_data.empty()) {
                     last_csv_filename = ExportBenchmarkToCSV(benchmark_data);
 
-                    // Calcular métricas promedio del benchmark
                     double sum_fps = 0.0;
                     std::vector<float> bench_fts;
                     bench_fts.reserve(benchmark_data.size());
@@ -314,7 +322,7 @@ int main() {
         }
         f11_pressed_prev = f11_pressed_now;
 
-        // Guardia de seguridad para el redimensionado en Linux
+        // Guardia de seguridad para redimensionado en Linux (Dashboard)
         if (!is_hud_mode) {
             int current_w, current_h;
             glfwGetWindowSize(window, &current_w, &current_h);
@@ -323,7 +331,7 @@ int main() {
             }
         }
 
-        // Medición de Frametime y FPS por fotograma
+        // Medición de Frametime y FPS
         double frame_delta = now - last_frame_time;
         last_frame_time = now;
         
@@ -338,7 +346,6 @@ int main() {
 
             fps_1percent_low = CalculateLowFPS(frametime_history, 0.01f);
 
-            // Muestreo dinámico si el benchmark está activo
             if (is_benchmarking) {
                 TelemetrySample sample;
                 sample.timestamp_sec = now - benchmark_start_time;
@@ -386,14 +393,14 @@ int main() {
         ImGui::NewFrame();
 
         if (is_hud_mode) {
-            // MODO 1: MICRO-HUD OVERLAY FLOTANTE
+            // --- MODO 1: MICRO-HUD OVERLAY (ARRASTRABLE Y REDIMENSIONABLE) ---
             ImGui::SetNextWindowPos(ImVec2(0, 0));
-            ImGui::SetNextWindowSize(io.DisplaySize);
+            // Restricción mínima actualizada (260x95)
+            ImGui::SetNextWindowSizeConstraints(ImVec2(260, 95), ImVec2(650, 350));
 
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 8));
             ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
             
-            // Fondo con tinte rojo si se está grabando benchmark
             if (is_benchmarking) {
                 ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.25f, 0.04f, 0.04f, 0.90f));
                 ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(1.00f, 0.20f, 0.20f, 0.80f));
@@ -402,12 +409,51 @@ int main() {
                 ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.20f, 0.80f, 1.00f, 0.40f));
             }
 
-            ImGuiWindowFlags hud_flags = ImGuiWindowFlags_NoTitleBar | 
-                                         ImGuiWindowFlags_NoResize | 
-                                         ImGuiWindowFlags_NoMove;
+            ImGuiWindowFlags hud_flags = ImGuiWindowFlags_NoTitleBar;
 
             ImGui::Begin("HUD_CompactPill", nullptr, hud_flags);
             
+            // Fila 0: Barra de Arrastre / Marca
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.4f, 0.5f, 1.0f));
+            ImGui::TextUnformatted(":: GAMEPERFTRACE");
+            ImGui::PopStyleColor();
+
+            // Lógica de movimiento con arrastre de ratón
+            double cx, cy;
+            glfwGetCursorPos(window, &cx, &cy);
+
+            if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                is_dragging_hud = true;
+                drag_start_offset_x = cx;
+                drag_start_offset_y = cy;
+            }
+
+            if (is_dragging_hud) {
+                if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
+                    int wx, wy;
+                    glfwGetWindowPos(window, &wx, &wy);
+                    int new_wx = wx + static_cast<int>(cx - drag_start_offset_x);
+                    int new_wy = wy + static_cast<int>(cy - drag_start_offset_y);
+                    glfwSetWindowPos(window, new_wx, new_wy);
+                    hud_win_x = new_wx;
+                    hud_win_y = new_wy;
+                } else {
+                    is_dragging_hud = false;
+                }
+            }
+
+            // Lógica de redimensionado dinámico con la ventana GLFW
+            ImVec2 current_imgui_size = ImGui::GetWindowSize();
+            int cur_glfw_w, cur_glfw_h;
+            glfwGetWindowSize(window, &cur_glfw_w, &cur_glfw_h);
+
+            if (std::abs(static_cast<int>(current_imgui_size.x) - cur_glfw_w) > 2 ||
+                std::abs(static_cast<int>(current_imgui_size.y) - cur_glfw_h) > 2) {
+                hud_win_w = static_cast<int>(current_imgui_size.x);
+                hud_win_h = static_cast<int>(current_imgui_size.y);
+                glfwSetWindowSize(window, hud_win_w, hud_win_h);
+            }
+
             // Fila 1: FPS, 1% Low e Indicador REC
             ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), "%.0f FPS", current_fps);
             ImGui::SameLine();
@@ -431,13 +477,12 @@ int main() {
             ImGui::PopStyleVar(2);
 
         } else {
-            // MODO 2: DASHBOARD PRO COMPLETO
+            // --- MODO 2: DASHBOARD PRO COMPLETO ---
             ImGui::SetNextWindowPos(ImVec2(0, 0));
             ImGui::SetNextWindowSize(io.DisplaySize);
 
             ImGui::Begin("MainPanel", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
 
-            // Cabecera con estado de Grabación
             ImGui::TextColored(ImVec4(0.2f, 0.8f, 1.0f, 1.0f), "GAMEPERFTRACE HARDWARE MONITOR");
             ImGui::SameLine(ImGui::GetWindowWidth() - 580);
 
@@ -454,7 +499,6 @@ int main() {
             ImGui::Separator();
             ImGui::Spacing();
 
-            // BANNER DE NOTIFICACIÓN TRAS GRAVACIÓN DE BENCHMARK
             if (show_benchmark_result && !is_benchmarking) {
                 ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.35f, 0.15f, 0.40f));
                 ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.20f, 0.90f, 0.40f, 0.60f));

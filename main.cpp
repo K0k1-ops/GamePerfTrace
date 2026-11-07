@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <numeric>
 #include "SystemMonitor.hpp"
 
 #include <GLFW/glfw3.h>
@@ -84,6 +85,21 @@ void LoadCrispSystemFont(ImGuiIO& io, float font_size) {
     }
 }
 
+// Cálculo de percentiles (1% y 0.1% Lows) basado en los milisegundos de cada frame
+float CalculateLowFPS(const std::vector<float>& ft_buffer, float percentile) {
+    if (ft_buffer.empty()) return 0.0f;
+
+    std::vector<float> sorted_ft = ft_buffer;
+    // Ordenar de mayor a menor ms (los peores milisegundos primero)
+    std::sort(sorted_ft.rbegin(), sorted_ft.rend());
+
+    size_t count = std::max<size_t>(1, static_cast<size_t>(sorted_ft.size() * percentile));
+    double sum_worst_ms = std::accumulate(sorted_ft.begin(), sorted_ft.begin() + count, 0.0);
+    double avg_worst_ms = sum_worst_ms / count;
+
+    return (avg_worst_ms > 0.0) ? static_cast<float>(1000.0 / avg_worst_ms) : 0.0f;
+}
+
 int main() {
     if (!glfwInit()) return -1;
 
@@ -96,7 +112,7 @@ int main() {
         return -1;
     }
     glfwMakeContextCurrent(window);
-    glfwSwapInterval(1); // V-Sync activado para estabilidad de render
+    glfwSwapInterval(1);
 
     glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
 
@@ -131,48 +147,62 @@ int main() {
     specs.gpu_version = reinterpret_cast<const char*>(glGetString(GL_VERSION));
     specs.gpu_glsl_version = reinterpret_cast<const char*>(glGetString(GL_SHADING_LANGUAGE_VERSION));
 
-    const int MAX_SAMPLES = 100;
-    std::vector<float> cpu_history(MAX_SAMPLES, 0.0f);
-    std::vector<float> ram_history(MAX_SAMPLES, 0.0f);
-    std::vector<float> net_dl_history(MAX_SAMPLES, 0.0f);
-    std::vector<float> disk_read_history(MAX_SAMPLES, 0.0f);
+    const int MAX_HARDWARE_SAMPLES = 100;
+    std::vector<float> cpu_history(MAX_HARDWARE_SAMPLES, 0.0f);
+    std::vector<float> ram_history(MAX_HARDWARE_SAMPLES, 0.0f);
+    std::vector<float> net_dl_history(MAX_HARDWARE_SAMPLES, 0.0f);
+    std::vector<float> disk_read_history(MAX_HARDWARE_SAMPLES, 0.0f);
+
+    // Buffer de 300 muestras para calcular percentiles de Frametime
+    const int MAX_FRAME_SAMPLES = 300;
+    std::vector<float> frametime_history;
+    frametime_history.reserve(MAX_FRAME_SAMPLES);
 
     double last_hardware_update = glfwGetTime();
-    
-    // Variables para el cálculo de FPS y Frametime
     double last_frame_time = glfwGetTime();
+    
     float current_fps = 0.0f;
     float current_frametime_ms = 0.0f;
+    float fps_1percent_low = 0.0f;
+    float fps_01percent_low = 0.0f;
 
-    // Estado del HUD Overlay y Hotkey F12
     bool show_hud_overlay = true;
     bool f12_pressed_prev = false;
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
 
-        // 1. Detección de Hotkey F12 para mostrar/ocultar el Overlay
+        // Hotkey F12
         bool f12_pressed_now = (glfwGetKey(window, GLFW_KEY_F12) == GLFW_PRESS);
         if (f12_pressed_now && !f12_pressed_prev) {
             show_hud_overlay = !show_hud_overlay;
         }
         f12_pressed_prev = f12_pressed_now;
 
-        // 2. Cálculo preciso de FPS y Frametime (ms) por frame
+        // Medición de tiempo por fotograma
         double now = glfwGetTime();
         double frame_delta = now - last_frame_time;
         last_frame_time = now;
+        
         if (frame_delta > 0.0) {
-            current_fps = static_cast<float>(1.0 / frame_delta);
             current_frametime_ms = static_cast<float>(frame_delta * 1000.0);
+            current_fps = static_cast<float>(1.0 / frame_delta);
+
+            frametime_history.push_back(current_frametime_ms);
+            if (frametime_history.size() > MAX_FRAME_SAMPLES) {
+                frametime_history.erase(frametime_history.begin());
+            }
+
+            // Actualización de 1% y 0.1% Lows
+            fps_1percent_low = CalculateLowFPS(frametime_history, 0.01f);
+            fps_01percent_low = CalculateLowFPS(frametime_history, 0.001f);
         }
 
-        // 3. Ajuste de Viewport
         int display_w, display_h;
         glfwGetFramebufferSize(window, &display_w, &display_h);
         glViewport(0, 0, display_w, display_h);
 
-        // 4. Muestreo de Hardware (cada 0.5 segundos)
+        // Muestreo de Telemetría cada 0.5s
         if (now - last_hardware_update >= 0.5) {
             float cpu = monitor.getCpuUsage();
             float ram = static_cast<float>(monitor.getRamUsageMB());
@@ -198,13 +228,12 @@ int main() {
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
-        // --- DASHBOARD PRINCIPAL ---
+        // DASHBOARD PRINCIPAL
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(io.DisplaySize);
 
         ImGui::Begin("MainPanel", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
 
-        // Cabecera Principal
         ImGui::TextColored(ImVec4(0.2f, 0.8f, 1.0f, 1.0f), "GAMEPERFTRACE HARDWARE MONITOR");
         ImGui::SameLine(ImGui::GetWindowWidth() - 480);
         ImGui::Text("F12: HUD [%s] | Uptime: %s", show_hud_overlay ? "ON" : "OFF", formatUptime(monitor.getUptimeSeconds()).c_str());
@@ -212,15 +241,14 @@ int main() {
         ImGui::Separator();
         ImGui::Spacing();
 
-        // 1. TARJETAS DE RESUMEN RÁPIDO (KPI CARDS)
+        // KPI CARDS
         ImGui::Columns(4, "kpis", false);
 
         char cpu_val[32];
         float temp = monitor.getCpuTemperature();
         if (temp > 0.0f) snprintf(cpu_val, sizeof(cpu_val), "%.1f%% (%.0f°C)", cpu_history.back(), temp);
         else snprintf(cpu_val, sizeof(cpu_val), "%.1f%%", cpu_history.back());
-        const char* cpu_st = cpu_history.back() > 85.0f ? "Pico de Carga" : "Carga Normal";
-        RenderKpiCard("PROCESADOR (CPU)", cpu_val, cpu_st, ImVec4(0.2f, 0.7f, 1.0f, 1.0f));
+        RenderKpiCard("PROCESADOR (CPU)", cpu_val, cpu_history.back() > 85.0f ? "Pico de Carga" : "Carga Normal", ImVec4(0.2f, 0.7f, 1.0f, 1.0f));
 
         ImGui::NextColumn();
 
@@ -233,21 +261,24 @@ int main() {
 
         ImGui::NextColumn();
 
-        std::string net_val = formatRate(net_dl_history.back());
-        const char* net_st = net_dl_history.back() > 2000.0f ? "Descarga Intensa" : "Red Estable";
-        RenderKpiCard("RED (DESCARGA)", net_val.c_str(), net_st, ImVec4(0.2f, 0.9f, 0.5f, 1.0f));
+        // KPI REEMPLAZADA: Muestra FPS Medios y 1% Lows
+        char fps_val[32];
+        snprintf(fps_val, sizeof(fps_val), "%.0f FPS", current_fps);
+        char fps_st[64];
+        snprintf(fps_st, sizeof(fps_st), "1%% Low: %.0f FPS", fps_1percent_low);
+        ImVec4 fps_color = (fps_1percent_low < current_fps * 0.6f) ? ImVec4(1.0f, 0.4f, 0.2f, 1.0f) : ImVec4(0.2f, 0.9f, 0.4f, 1.0f);
+        RenderKpiCard("RENDIMIENTO JUEGO", fps_val, fps_st, fps_color);
 
         ImGui::NextColumn();
 
         std::string disk_val = formatRate(disk_read_history.back());
-        const char* disk_st = disk_read_history.back() > 10000.0f ? "Cargando Archivos" : "Disco Reposado";
-        RenderKpiCard("DISCO (LECTURA)", disk_val.c_str(), disk_st, ImVec4(1.0f, 0.6f, 0.2f, 1.0f));
+        RenderKpiCard("DISCO (LECTURA)", disk_val.c_str(), disk_read_history.back() > 10000.0f ? "Cargando Archivos" : "Disco Reposado", ImVec4(1.0f, 0.6f, 0.2f, 1.0f));
 
         ImGui::Columns(1);
         ImGui::Spacing();
         ImGui::Separator();
 
-        // 2. PESTAÑAS DETALLADAS
+        // PESTAÑAS
         if (ImGui::BeginTabBar("Tabs")) {
             
             if (ImGui::BeginTabItem(" Telemetria en Vivo ")) {
@@ -259,18 +290,19 @@ int main() {
 
                 ImGui::Columns(2, "row1", false);
                 
-                char cpu_lbl[64];
-                snprintf(cpu_lbl, sizeof(cpu_lbl), "CPU Load: %.1f%%", cpu_history.back());
-                ImGui::PushStyleColor(ImGuiCol_PlotLines, ImVec4(0.2f, 0.7f, 1.0f, 1.0f));
-                ImGui::PlotLines("##CPU", cpu_history.data(), MAX_SAMPLES, 0, cpu_lbl, 0.0f, 100.0f, ImVec2(-1, dynamic_plot_height));
+                // Gráfica de Frametime en Milisegundos (Detector de Tirones)
+                char ft_lbl[64];
+                snprintf(ft_lbl, sizeof(ft_lbl), "Frametime: %.1f ms | 1%% Low: %.0f FPS", current_frametime_ms, fps_1percent_low);
+                ImGui::PushStyleColor(ImGuiCol_PlotLines, ImVec4(0.2f, 0.9f, 0.4f, 1.0f));
+                ImGui::PlotLines("##Frametime", frametime_history.data(), static_cast<int>(frametime_history.size()), 0, ft_lbl, 0.0f, 50.0f, ImVec2(-1, dynamic_plot_height));
                 ImGui::PopStyleColor();
 
                 ImGui::NextColumn();
 
-                char ram_lbl[64];
-                snprintf(ram_lbl, sizeof(ram_lbl), "RAM Used: %.0f / %lu MB", ram_history.back(), specs.total_ram_mb);
-                ImGui::PushStyleColor(ImGuiCol_PlotLines, ImVec4(0.7f, 0.3f, 1.0f, 1.0f));
-                ImGui::PlotLines("##RAM", ram_history.data(), MAX_SAMPLES, 0, ram_lbl, 0.0f, static_cast<float>(specs.total_ram_mb), ImVec2(-1, dynamic_plot_height));
+                char cpu_lbl[64];
+                snprintf(cpu_lbl, sizeof(cpu_lbl), "CPU Load: %.1f%%", cpu_history.back());
+                ImGui::PushStyleColor(ImGuiCol_PlotLines, ImVec4(0.2f, 0.7f, 1.0f, 1.0f));
+                ImGui::PlotLines("##CPU", cpu_history.data(), MAX_HARDWARE_SAMPLES, 0, cpu_lbl, 0.0f, 100.0f, ImVec2(-1, dynamic_plot_height));
                 ImGui::PopStyleColor();
 
                 ImGui::Columns(1);
@@ -278,22 +310,20 @@ int main() {
 
                 ImGui::Columns(2, "row2", false);
 
+                char ram_lbl[64];
+                snprintf(ram_lbl, sizeof(ram_lbl), "RAM Used: %.0f / %lu MB", ram_history.back(), specs.total_ram_mb);
+                ImGui::PushStyleColor(ImGuiCol_PlotLines, ImVec4(0.7f, 0.3f, 1.0f, 1.0f));
+                ImGui::PlotLines("##RAM", ram_history.data(), MAX_HARDWARE_SAMPLES, 0, ram_lbl, 0.0f, static_cast<float>(specs.total_ram_mb), ImVec2(-1, dynamic_plot_height));
+                ImGui::PopStyleColor();
+
+                ImGui::NextColumn();
+
                 float max_net = *std::max_element(net_dl_history.begin(), net_dl_history.end());
                 float net_scale = std::max(500.0f, max_net * 1.2f);
                 std::string net_lbl = "Red Descarga: " + formatRate(net_dl_history.back());
                 
                 ImGui::PushStyleColor(ImGuiCol_PlotLines, ImVec4(0.2f, 0.9f, 0.5f, 1.0f));
-                ImGui::PlotLines("##NET", net_dl_history.data(), MAX_SAMPLES, 0, net_lbl.c_str(), 0.0f, net_scale, ImVec2(-1, dynamic_plot_height));
-                ImGui::PopStyleColor();
-
-                ImGui::NextColumn();
-
-                float max_disk = *std::max_element(disk_read_history.begin(), disk_read_history.end());
-                float disk_scale = std::max(2000.0f, max_disk * 1.2f);
-                std::string disk_lbl = "Disco Lectura: " + formatRate(disk_read_history.back());
-
-                ImGui::PushStyleColor(ImGuiCol_PlotLines, ImVec4(1.0f, 0.6f, 0.2f, 1.0f));
-                ImGui::PlotLines("##DISK", disk_read_history.data(), MAX_SAMPLES, 0, disk_lbl.c_str(), 0.0f, disk_scale, ImVec2(-1, dynamic_plot_height));
+                ImGui::PlotLines("##NET", net_dl_history.data(), MAX_HARDWARE_SAMPLES, 0, net_lbl.c_str(), 0.0f, net_scale, ImVec2(-1, dynamic_plot_height));
                 ImGui::PopStyleColor();
 
                 ImGui::Columns(1);
@@ -355,10 +385,10 @@ int main() {
 
         ImGui::End();
 
-        // --- 5. OVERLAY FLOTANTE COMPACTO (HUD) ---
+        // OVERLAY FLOTANTE (HUD CON 1% LOWS Y DETECTOR DE TIRONES)
         if (show_hud_overlay) {
             ImGui::SetNextWindowPos(ImVec2(15, 15), ImGuiCond_Always);
-            ImGui::SetNextWindowBgAlpha(0.75f); // Fondo translúcido tipo HUD de juegos
+            ImGui::SetNextWindowBgAlpha(0.75f);
             
             ImGuiWindowFlags hud_flags = ImGuiWindowFlags_NoDecoration | 
                                          ImGuiWindowFlags_AlwaysAutoResize | 
@@ -369,20 +399,26 @@ int main() {
 
             ImGui::Begin("HUD_Overlay", nullptr, hud_flags);
             
-            // FPS & Frametime
-            ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.4f, 1.0f), "FPS: %.0f (%.1f ms)", current_fps, current_frametime_ms);
+            // FPS Medios + 1% Lows + 0.1% Lows
+            ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.4f, 1.0f), "FPS: %.0f", current_fps);
+            ImGui::Text("1%% Low: %.0f FPS", fps_1percent_low);
+            ImGui::Text("0.1%% Low: %.0f FPS", fps_01percent_low);
+            ImGui::Text("Frametime: %.1f ms", current_frametime_ms);
+            
+            // Alerta visual de Stuttering si el frametime actual supera los 33ms (caída < 30 FPS)
+            if (current_frametime_ms > 33.3f) {
+                ImGui::TextColored(ImVec4(1.0f, 0.2f, 0.2f, 1.0f), "[!] TIRÓN DETECTADO");
+            }
+
             ImGui::Separator();
             
-            // CPU & Temperatura
             if (temp > 0.0f) {
                 ImGui::Text("CPU: %.1f%% (%.0f°C)", cpu_history.back(), temp);
             } else {
                 ImGui::Text("CPU: %.1f%%", cpu_history.back());
             }
             
-            // RAM & Red
             ImGui::Text("RAM: %.0f MB", ram_history.back());
-            ImGui::Text("NET: %s", formatRate(net_dl_history.back()).c_str());
             
             ImGui::End();
         }
